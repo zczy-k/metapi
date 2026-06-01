@@ -1,19 +1,17 @@
 #!/usr/bin/env bash
 #
 # ╔════════════════════════════════════════════════════════════╗
-# ║  Metapi 一键部署脚本 v4 (Ubuntu 22.04)                    ║
-# ║  自动检测平台 → 下载预编译包 → 安装 → 启动               ║
-# ║  无需用户选择，全程自动                                    ║
+# ║  Metapi 一键部署脚本 v5 (Ubuntu 22.04)                    ║
+# ║  交互菜单 → 自动检测平台 → 下载预编译包 → 安装 → 启动    ║
 # ╚════════════════════════════════════════════════════════════╝
 #
 # 用法:
-#   sudo bash metapi-deploy.sh                    # 一键部署（预编译模式）
+#   sudo bash metapi-deploy.sh                    # 交互式菜单部署
 #   sudo bash metapi-deploy.sh --source           # 强制源码编译模式
 #   sudo bash metapi-deploy.sh --uninstall        # 卸载（保留数据）
 #   sudo bash metapi-deploy.sh --uninstall-all    # 完整卸载
 #   sudo bash metapi-deploy.sh --repair           # 依赖修复
-#   sudo bash metapi-deploy.sh --token TOKEN      # 非交互式指定 AUTH_TOKEN
-#   sudo bash metapi-deploy.sh --token TOKEN --proxy-token PTOKEN  # 指定两个令牌
+#   sudo bash metapi-deploy.sh --token TOKEN --proxy-token PT  # 非交互式
 #
 # 一键安装（远程）:
 #   curl -fsSL https://raw.githubusercontent.com/zczy-k/metapi/main/deploy/bare-metal/metapi-deploy.sh | sudo bash -s --
@@ -40,7 +38,7 @@ readonly RELEASE_API="https://api.github.com/repos/zczy-k/metapi/releases/latest
 readonly SCRIPT_URL="https://raw.githubusercontent.com/zczy-k/metapi/main/deploy/bare-metal/metapi-deploy.sh"
 readonly DEFAULT_PORT=4000
 readonly MARKER_FILE="${APP_DIR}/.metapi_installed"
-readonly MARKER_VERSION="4"
+readonly MARKER_VERSION="5"
 readonly SWAP_FILE="/swapfile_metapi"
 readonly SYSCTL_CONF="/etc/sysctl.d/99-metapi.conf"
 
@@ -50,6 +48,7 @@ INSTALL_MODE="prebuilt"  # prebuilt | source
 FORCE_MODE=""            # --source / --uninstall / --uninstall-all / --repair
 CLI_AUTH_TOKEN=""
 CLI_PROXY_TOKEN=""
+SKIP_MENU=0              # 跳过交互菜单
 
 # 步骤追踪
 declare -a COMPLETED_STEPS=()
@@ -80,20 +79,20 @@ parse_args() {
       --uninstall)      FORCE_MODE="uninstall"; shift ;;
       --uninstall-all)  FORCE_MODE="uninstall-all"; shift ;;
       --repair)         FORCE_MODE="repair"; shift ;;
-      --token)          CLI_AUTH_TOKEN="${2:-}"; shift 2 ;;
-      --proxy-token)    CLI_PROXY_TOKEN="${2:-}"; shift 2 ;;
-      --yes|-y)         export NONINTERACTIVE=1; shift ;;
+      --token)          CLI_AUTH_TOKEN="${2:-}"; SKIP_MENU=1; shift 2 ;;
+      --proxy-token)    CLI_PROXY_TOKEN="${2:-}"; SKIP_MENU=1; shift 2 ;;
+      --yes|-y)         SKIP_MENU=1; shift ;;
       --help|-h)
         echo "用法: sudo bash metapi-deploy.sh [选项]"
         echo ""
         echo "选项:"
-        echo "  (无)              一键部署（自动检测平台，下载预编译包）"
+        echo "  (无)              交互式菜单部署"
         echo "  --source          强制源码编译模式"
         echo "  --uninstall       卸载（保留数据）"
         echo "  --uninstall-all   完整卸载（不保留数据）"
         echo "  --repair          依赖修复"
-        echo "  --token TOKEN     非交互式指定 AUTH_TOKEN"
-        echo "  --proxy-token PT  非交互式指定 PROXY_TOKEN"
+        echo "  --token TOKEN     指定 AUTH_TOKEN（跳过交互菜单）"
+        echo "  --proxy-token PT  指定 PROXY_TOKEN（跳过交互菜单）"
         echo "  --yes, -y         非交互式确认"
         echo "  --help, -h        显示帮助"
         exit 0 ;;
@@ -171,7 +170,7 @@ preflight_check() {
 
   mkdir -p "${LOG_DIR}"
   touch "${LOG_FILE}"
-  log "INFO" "===== 脚本 v4 启动 ====="
+  log "INFO" "===== 脚本 v5 启动 ====="
 }
 
 # ═══════════════════════════════════════════════════════════
@@ -197,9 +196,9 @@ detect_os() {
 # 资源检测
 # ═══════════════════════════════════════════════════════════
 get_memory_mb()   { awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo; }
-get_avail_mb()   { awk '/MemAvailable/ {printf "%d", $2/1024}' /proc/meminfo; }
-get_disk_mb()    { local kb; kb=$(df -P /opt 2>/dev/null | awk 'NR==2{print $4}'); echo $(( kb / 1024 )); }
-get_swap_mb()    { awk '/SwapTotal/ {printf "%d", $2/1024}' /proc/meminfo; }
+get_avail_mb()    { awk '/MemAvailable/ {printf "%d", $2/1024}' /proc/meminfo; }
+get_disk_mb()     { local kb; kb=$(df -P /opt 2>/dev/null | awk 'NR==2{print $4}'); echo $(( kb / 1024 )); }
+get_swap_mb()     { awk '/SwapTotal/ {printf "%d", $2/1024}' /proc/meminfo; }
 
 get_memory_limit() {
   local mem; mem=$(get_memory_mb)
@@ -236,7 +235,7 @@ get_release_asset_url() {
 }
 
 # ═══════════════════════════════════════════════════════════
-# 端口自动检测（自动选择可用端口，无需用户交互）
+# 端口自动检测
 # ═══════════════════════════════════════════════════════════
 port_in_use() { ss -tlnp 2>/dev/null | grep -q ":${1} "; }
 
@@ -275,7 +274,6 @@ install_node() {
 
   info "安装 Node.js ${NODE_MAJOR}..."
 
-  # 优先使用 NodeSource
   local retry=0
   while [ $retry -lt 3 ]; do
     if curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - 2>&1; then break; fi
@@ -287,7 +285,6 @@ install_node() {
     return 0
   fi
 
-  # 回退：官方二进制
   warn "NodeSource 安装失败，使用官方二进制..."
   local arch; arch=$(detect_arch)
   local node_arch="$arch"
@@ -321,7 +318,7 @@ install_build_deps() {
 }
 
 # ═══════════════════════════════════════════════════════════
-# 下载预编译包（核心步骤：自动检测架构并下载）
+# 下载预编译包
 # ═══════════════════════════════════════════════════════════
 download_prebuilt() {
   local arch; arch=$(detect_arch)
@@ -334,7 +331,6 @@ download_prebuilt() {
     return 0
   fi
 
-  # 查询 GitHub Release
   info "查询最新版本..."
   local release_info
   release_info=$(get_latest_release)
@@ -346,8 +342,7 @@ download_prebuilt() {
     echo -e "    - 项目尚未发布预编译包"
     echo -e "    - 网络无法访问 GitHub API"
     echo ""
-    echo -e "  ${CYAN}解决方案: 使用源码编译模式${NC}"
-    echo -e "    sudo bash $0 --source"
+    echo -e "  ${CYAN}将自动切换到源码编译模式${NC}"
     echo ""
     INSTALL_MODE="source"
     return 0
@@ -356,7 +351,6 @@ download_prebuilt() {
   local version; version=$(get_release_version "$release_info")
   info "最新版本: ${version}"
 
-  # 查找对应架构的下载链接
   local download_url
   download_url=$(get_release_asset_url "$release_info" "$arch")
 
@@ -368,7 +362,6 @@ download_prebuilt() {
 
   info "下载地址: ${download_url}"
 
-  # 下载
   local tmp_dir; tmp_dir=$(mktemp -d)
   local filename; filename=$(basename "$download_url")
   local tmp_file="${tmp_dir}/${filename}"
@@ -380,7 +373,6 @@ download_prebuilt() {
     return 1
   fi
 
-  # 解压
   info "解压..."
   if ! tar -xzf "$tmp_file" -C "$tmp_dir" 2>&1; then
     error "解压失败，文件可能已损坏"
@@ -388,7 +380,6 @@ download_prebuilt() {
     return 1
   fi
 
-  # 找到解压后的目录
   local extracted_dir
   extracted_dir=$(find "$tmp_dir" -maxdepth 1 -type d -name "metapi-*" | head -1)
   [ -z "$extracted_dir" ] && extracted_dir=$(find "$tmp_dir" -maxdepth 1 -type d | tail -1)
@@ -399,10 +390,8 @@ download_prebuilt() {
     return 1
   fi
 
-  # 安装到目标目录
   info "安装到 ${APP_DIR}..."
 
-  # 保留已有的 .env 和 data/
   if [ -f "${APP_DIR}/.env" ]; then
     cp -a "${APP_DIR}/.env" "${tmp_dir}/env_backup"
   fi
@@ -410,18 +399,15 @@ download_prebuilt() {
     cp -a "${APP_DIR}/data" "${tmp_dir}/data_backup"
   fi
 
-  # 清理并复制
   rm -rf "${APP_DIR:?}"/* "${APP_DIR}"/.[!.]* 2>/dev/null || true
   mkdir -p "${APP_DIR}"
   cp -a "${extracted_dir}/." "${APP_DIR}/"
 
-  # 恢复配置和数据
   [ -f "${tmp_dir}/env_backup" ] && cp -a "${tmp_dir}/env_backup" "${APP_DIR}/.env"
   [ -d "${tmp_dir}/data_backup" ] && cp -a "${tmp_dir}/data_backup/." "${APP_DIR}/data/"
 
   rm -rf "${tmp_dir}"
 
-  # 验证
   [ ! -f "${APP_DIR}/dist/server/index.js" ] && { error "验证失败: dist/server/index.js 缺失"; return 1; }
 
   success "预编译包安装完成 (版本: ${version}, 架构: ${arch})"
@@ -443,7 +429,6 @@ clone_and_build() {
     cd "${APP_DIR}"
   fi
 
-  # npm install
   info "安装依赖..."
   local retry=0
   while [ $retry -lt 3 ]; do
@@ -454,18 +439,15 @@ clone_and_build() {
   done
   [ $retry -ge 3 ] && { error "npm ci 失败"; return 1; }
 
-  # 重建原生模块
   info "重建原生模块..."
   npm rebuild esbuild sharp better-sqlite3 --no-audit --no-fund 2>&1 | tail -5
 
-  # 构建
   info "构建前端..."
   npm run build:web 2>&1 | tail -5 || { error "前端构建失败"; return 1; }
 
   info "构建后端..."
   npm run build:server 2>&1 | tail -5 || { error "后端构建失败"; return 1; }
 
-  # 清理
   npm prune --omit=dev --no-audit --no-fund 2>&1 | tail -3
 
   [ ! -f "${APP_DIR}/dist/server/index.js" ] && { error "构建验证失败"; return 1; }
@@ -479,7 +461,6 @@ clone_and_build() {
 create_user() {
   if id "${APP_USER}" &>/dev/null; then
     info "用户 '${APP_USER}' 已存在"
-    # 确保 home 目录正确
     local home; home=$(getent passwd "${APP_USER}" | cut -d: -f6)
     [ "$home" != "${APP_DIR}" ] && usermod -d "${APP_DIR}" "${APP_USER}"
     return 0
@@ -492,7 +473,7 @@ create_user() {
 }
 
 # ═══════════════════════════════════════════════════════════
-# 配置环境变量（仅提示 AUTH_TOKEN 和 PROXY_TOKEN）
+# 配置环境变量
 # ═══════════════════════════════════════════════════════════
 configure_env() {
   if [ -f "${ENV_FILE}" ]; then
@@ -502,31 +483,10 @@ configure_env() {
     return 0
   fi
 
-  info "配置环境变量..."
+  info "写入配置文件..."
 
   local auth_token="${CLI_AUTH_TOKEN}"
   local proxy_token="${CLI_PROXY_TOKEN}"
-
-  # 如果没有通过命令行指定，交互式输入
-  if [ -z "$auth_token" ]; then
-    echo ""
-    echo -e "${CYAN}请设置认证令牌（唯一需要手动输入的步骤）:${NC}"
-    echo -e "  ${YELLOW}AUTH_TOKEN${NC}    = 管理后台登录令牌"
-    echo -e "  ${YELLOW}PROXY_TOKEN${NC}   = 下游 API 调用令牌"
-    echo ""
-    while true; do
-      read -rp "AUTH_TOKEN: " auth_token
-      [ -z "$auth_token" ] || [ "$auth_token" = "change-me-admin-token" ] && { warn "请设置安全令牌"; continue; } || break
-    done
-  fi
-
-  if [ -z "$proxy_token" ]; then
-    while true; do
-      read -rp "PROXY_TOKEN: " proxy_token
-      [ -z "$proxy_token" ] || [ "$proxy_token" = "change-me-proxy-sk-token" ] && { warn "请设置安全令牌"; continue; } || break
-    done
-  fi
-
   local mem_limit; mem_limit=$(get_memory_limit)
 
   cat > "${ENV_FILE}" << EOF
@@ -595,7 +555,6 @@ install_systemd_service() {
   local node_path; node_path=$(which node)
   local mem_limit; mem_limit=$(get_memory_limit)
 
-  # 读取 .env 中的环境变量注入服务
   local env_block=""
   if [ -f "${ENV_FILE}" ]; then
     while IFS='=' read -r key value; do
@@ -725,7 +684,6 @@ show_firewall_hint() {
 
   echo -e "  ${YELLOW}⚠ 云服务器需在安全组中放行 ${ACTUAL_PORT}/TCP${NC}"
 
-  # 验证本地端口
   sleep 2
   if curl -sf --connect-timeout 3 "http://127.0.0.1:${ACTUAL_PORT}" >/dev/null 2>&1; then
     success "端口 ${ACTUAL_PORT} 本地可达 ✓"
@@ -735,19 +693,181 @@ show_firewall_hint() {
 }
 
 # ═══════════════════════════════════════════════════════════
+# 交互式菜单
+# ═══════════════════════════════════════════════════════════
+show_interactive_menu() {
+  local arch; arch=$(detect_arch)
+  local os; os=$(detect_os)
+  local mem_mb; mem_mb=$(get_memory_mb)
+  local disk_mb; disk_mb=$(get_disk_mb)
+
+  # 菜单内可编辑的变量（使用全局变量）
+  local menu_install_mode="${INSTALL_MODE}"
+  local menu_port="${ACTUAL_PORT}"
+  local menu_auth_token="${CLI_AUTH_TOKEN}"
+  local menu_proxy_token="${CLI_PROXY_TOKEN}"
+
+  while true; do
+    # 清屏并显示菜单
+    clear
+
+    echo ""
+    echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════════════╗${NC}"
+    echo -e "${BOLD}${CYAN}║                                                      ║${NC}"
+    echo -e "${BOLD}${CYAN}║          ${BOLD}${GREEN}Metapi 一键部署${NC}${BOLD}${CYAN}                              ║${NC}"
+    echo -e "${BOLD}${CYAN}║                                                      ║${NC}"
+    echo -e "${BOLD}${CYAN}╚══════════════════════════════════════════════════════╝${NC}"
+    echo ""
+
+    # 系统信息
+    echo -e "  ${DIM}系统信息${NC}"
+    echo -e "  ${CYAN}──────────────────────────────────${NC}"
+    echo -e "  平台     ${BOLD}${os} / ${arch}${NC}"
+    echo -e "  内存     ${BOLD}${mem_mb}MB${NC}"
+    echo -e "  磁盘     ${BOLD}${disk_mb}MB 可用${NC}"
+    echo ""
+
+    # 配置项
+    echo -e "  ${DIM}部署配置${NC}"
+    echo -e "  ${CYAN}──────────────────────────────────${NC}"
+
+    # 安装模式
+    if [ "$menu_install_mode" = "prebuilt" ]; then
+      echo -e "  ${GREEN}[1]${NC} 安装模式    ${GREEN}预编译下载（推荐低配服务器）${NC}"
+    else
+      echo -e "  ${GREEN}[1]${NC} 安装模式    ${YELLOW}源码编译（需要更多资源）${NC}"
+    fi
+
+    # 端口
+    if port_in_use "$menu_port"; then
+      echo -e "  ${GREEN}[2]${NC} 访问端口    ${RED}${menu_port}（已占用）${NC}"
+    else
+      echo -e "  ${GREEN}[2]${NC} 访问端口    ${BOLD}${menu_port}${NC}"
+    fi
+
+    # 令牌
+    if [ -n "$menu_auth_token" ]; then
+      local masked_token; masked_token="${menu_auth_token:0:4}****${menu_auth_token: -4}"
+      [ ${#menu_auth_token} -le 8 ] && masked_token="****"
+      echo -e "  ${GREEN}[3]${NC} 管理令牌    ${BOLD}${masked_token}${NC}"
+    else
+      echo -e "  ${GREEN}[3]${NC} 管理令牌    ${RED}（未设置，必须填写）${NC}"
+    fi
+
+    if [ -n "$menu_proxy_token" ]; then
+      local masked_proxy; masked_proxy="${menu_proxy_token:0:4}****${menu_proxy_token: -4}"
+      [ ${#menu_proxy_token} -le 8 ] && masked_proxy="****"
+      echo -e "  ${GREEN}[4]${NC} 代理令牌    ${BOLD}${masked_proxy}${NC}"
+    else
+      echo -e "  ${GREEN}[4]${NC} 代理令牌    ${RED}（未设置，必须填写）${NC}"
+    fi
+
+    echo ""
+
+    # 操作选项
+    local can_start="yes"
+    [ -z "$menu_auth_token" ] && can_start="no"
+    [ -z "$menu_proxy_token" ] && can_start="no"
+
+    echo -e "  ${CYAN}──────────────────────────────────${NC}"
+    if [ "$can_start" = "yes" ]; then
+      echo -e "  ${BOLD}${GREEN}[0]${NC} ${BOLD}${GREEN}开始安装${NC}"
+    else
+      echo -e "  ${DIM}[0] 开始安装（请先设置令牌）${NC}"
+    fi
+    echo -e "  ${BOLD}${YELLOW}[q]${NC} 退出"
+    echo ""
+
+    # 提示
+    read -rp "  请选择 [0-4, q]: " choice
+
+    case "$choice" in
+      1)
+        # 切换安装模式
+        if [ "$menu_install_mode" = "prebuilt" ]; then
+          menu_install_mode="source"
+        else
+          menu_install_mode="prebuilt"
+        fi
+        ;;
+      2)
+        # 修改端口
+        echo ""
+        read -rp "  请输入端口号 (1-65535): " new_port
+        if [[ "$new_port" =~ ^[0-9]+$ ]] && [ "$new_port" -ge 1 ] && [ "$new_port" -le 65535 ]; then
+          menu_port="$new_port"
+        else
+          echo -e "  ${RED}无效端口号${NC}"
+          sleep 1
+        fi
+        ;;
+      3)
+        # 输入 AUTH_TOKEN
+        echo ""
+        echo -e "  ${YELLOW}管理令牌 (AUTH_TOKEN)${NC} = 管理后台登录密码"
+        read -rp "  请输入: " new_token
+        if [ -n "$new_token" ] && [ "$new_token" != "change-me-admin-token" ]; then
+          menu_auth_token="$new_token"
+        else
+          echo -e "  ${RED}令牌不能为空或使用默认值${NC}"
+          sleep 1
+        fi
+        ;;
+      4)
+        # 输入 PROXY_TOKEN
+        echo ""
+        echo -e "  ${YELLOW}代理令牌 (PROXY_TOKEN)${NC} = 下游 API 调用密钥"
+        read -rp "  请输入: " new_proxy
+        if [ -n "$new_proxy" ] && [ "$new_proxy" != "change-me-proxy-sk-token" ]; then
+          menu_proxy_token="$new_proxy"
+        else
+          echo -e "  ${RED}令牌不能为空或使用默认值${NC}"
+          sleep 1
+        fi
+        ;;
+      0)
+        # 开始安装
+        if [ "$can_start" = "no" ]; then
+          echo -e "  ${RED}请先设置管理令牌和代理令牌！${NC}"
+          sleep 1
+          continue
+        fi
+        # 将菜单选择写入全局变量
+        INSTALL_MODE="$menu_install_mode"
+        ACTUAL_PORT="$menu_port"
+        CLI_AUTH_TOKEN="$menu_auth_token"
+        CLI_PROXY_TOKEN="$menu_proxy_token"
+        return 0
+        ;;
+      q|Q)
+        echo -e "  ${YELLOW}已取消${NC}"
+        exit 0
+        ;;
+      *)
+        # 无效输入，重新显示菜单
+        ;;
+    esac
+  done
+}
+
+# ═══════════════════════════════════════════════════════════
 # 主流程：一键安装
 # ═══════════════════════════════════════════════════════════
 do_install() {
   COMPLETED_STEPS=()
   FAILED_STEPS=()
 
+  # 显示交互菜单（非交互模式跳过）
+  if [ "$SKIP_MENU" -eq 0 ]; then
+    show_interactive_menu
+  fi
+
   echo ""
   echo -e "${BOLD}${GREEN}╔══════════════════════════════════════════════╗${NC}"
-  echo -e "${BOLD}${GREEN}║       Metapi 一键部署                        ║${NC}"
+  echo -e "${BOLD}${GREEN}║       Metapi 开始部署                        ║${NC}"
   echo -e "${BOLD}${GREEN}╚══════════════════════════════════════════════╝${NC}"
   echo ""
 
-  # ── 显示环境信息 ──
   local arch; arch=$(detect_arch)
   local os; os=$(detect_os)
   local mem_mb; mem_mb=$(get_memory_mb)
@@ -762,9 +882,11 @@ do_install() {
   else
     echo -e "  模式:    ${YELLOW}源码编译（需要更多资源）${NC}"
   fi
+
+  echo -e "  端口:    ${CYAN}${ACTUAL_PORT}${NC}"
   echo ""
 
-  # ── 预检 ──
+  # 预检
   if [ "$disk_mb" -lt 300 ]; then
     error "磁盘可用空间仅 ${disk_mb}MB，至少需要 300MB"
     return 1
@@ -775,13 +897,11 @@ do_install() {
     return 1
   fi
 
-  # ── 自动解决端口冲突 ──
+  # 自动解决端口冲突
   auto_resolve_port
 
-  # ── 执行安装步骤 ──
-
+  # 执行安装步骤
   if [ "${INSTALL_MODE}" = "prebuilt" ]; then
-    # 预编译模式
     if ! run_step "安装 Node.js 运行时" install_node; then show_failure_report; return 1; fi
     if ! run_step "下载预编译包 (${arch})" download_prebuilt; then show_failure_report; return 1; fi
 
@@ -793,23 +913,21 @@ do_install() {
       if ! run_step "克隆代码并编译" clone_and_build; then show_failure_report; return 1; fi
     fi
   else
-    # 源码模式
     if ! run_step "安装编译依赖" install_build_deps; then show_failure_report; return 1; fi
     if ! run_step "安装 Node.js" install_node; then show_failure_report; return 1; fi
     if ! run_step "克隆代码并编译" clone_and_build; then show_failure_report; return 1; fi
   fi
 
-  # ── 通用步骤 ──
+  # 通用步骤
   if ! run_step "创建隔离用户" create_user; then show_failure_report; return 1; fi
   if ! run_step "配置环境变量" configure_env; then show_failure_report; return 1; fi
 
-  # Swap 配置失败不影响安装
   run_step "配置 Swap" configure_swap || true
 
   if ! run_step "安装服务并设置权限" _install_service_and_perms; then show_failure_report; return 1; fi
   if ! run_step "启动服务" start_service; then show_failure_report; return 1; fi
 
-  # ── 完成 ──
+  # 完成
   echo ""
   echo -e "${BOLD}${GREEN}╔══════════════════════════════════════════════╗${NC}"
   echo -e "${BOLD}${GREEN}║            部署完成！                        ║${NC}"
@@ -861,7 +979,6 @@ do_repair() {
 
   local issues=0
 
-  # Node.js
   if ! command -v node &>/dev/null; then
     error "✗ Node.js 未安装"; issues=$((issues + 1))
   else
@@ -869,19 +986,10 @@ do_repair() {
     [ "$major" -lt "$NODE_MAJOR" ] && { error "✗ Node.js 版本过低"; issues=$((issues + 1)); } || success "✓ Node.js $(node -v)"
   fi
 
-  # 安装目录
   [ ! -d "${APP_DIR}" ] && { error "✗ 安装目录不存在"; issues=$((issues + 1)); } || success "✓ ${APP_DIR}"
-
-  # 构建产物
   [ ! -f "${APP_DIR}/dist/server/index.js" ] && { error "✗ dist 缺失"; issues=$((issues + 1)); } || success "✓ dist 正常"
-
-  # 原生模块
   [ ! -f "${APP_DIR}/node_modules/better-sqlite3/build/Release/better_sqlite3.node" ] && { error "✗ better-sqlite3 未编译"; issues=$((issues + 1)); } || success "✓ better-sqlite3"
-
-  # 服务
   [ ! -f "${SERVICE_FILE}" ] && { error "✗ systemd 服务缺失"; issues=$((issues + 1)); } || success "✓ 服务文件存在"
-
-  # .env
   [ ! -f "${ENV_FILE}" ] && { error "✗ .env 缺失"; issues=$((issues + 1)); } || success "✓ .env"
 
   echo ""
@@ -924,7 +1032,6 @@ do_uninstall() {
   systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
   systemctl disable "${SERVICE_NAME}" 2>/dev/null || true
 
-  # 备份数据和配置
   local temp_data="/tmp/metapi_data_$$" temp_env="/tmp/metapi_env_$$"
   [ -d "${APP_DIR}/data" ] && mv "${APP_DIR}/data" "${temp_data}"
   [ -f "${ENV_FILE}" ] && cp -a "${ENV_FILE}" "${temp_env}"

@@ -8,6 +8,7 @@
 ## 目录
 
 - [一键部署](#一键部署)
+- [交互菜单说明](#交互菜单说明)
 - [架构说明](#架构说明)
 - [部署方式对比](#部署方式对比)
 - [命令行参数](#命令行参数)
@@ -30,34 +31,71 @@
 curl -fsSL https://raw.githubusercontent.com/zczy-k/metapi/main/deploy/bare-metal/metapi-deploy.sh | sudo bash -s --
 ```
 
-脚本会**全自动完成**：
-
-1. ✅ 检测系统平台（amd64 / arm64）
-2. ✅ 检测网络连通性
-3. ✅ 安装 Node.js 22 运行时
-4. ✅ 从 GitHub Release 下载对应架构的预编译包
-5. ✅ 创建隔离用户、配置 Swap（低内存自动）
-6. ✅ 提示输入 `AUTH_TOKEN` 和 `PROXY_TOKEN`（唯一需要手动输入的步骤）
-7. ✅ 安装 systemd 服务并启动
-8. ✅ 如果预编译包不可用，自动切换到源码编译模式
-
-**整个过程用户只需输入两个令牌，其他全部自动。**
-
-### 非交互式部署
-
-```bash
-# 指定令牌，完全无需交互
-curl -fsSL https://raw.githubusercontent.com/zczy-k/metapi/main/deploy/bare-metal/metapi-deploy.sh | \
-  sudo bash -s -- --token YOUR_ADMIN_TOKEN --proxy-token YOUR_PROXY_TOKEN
-```
+执行后**立即弹出交互菜单**，用户在菜单中完成配置后，脚本全自动完成部署。
 
 ### 先下载再部署
 
 ```bash
-# 如果 curl 管道方式不便使用
 wget https://raw.githubusercontent.com/zczy-k/metapi/main/deploy/bare-metal/metapi-deploy.sh
 sudo bash metapi-deploy.sh
 ```
+
+---
+
+## 交互菜单说明
+
+脚本启动后会显示如下交互界面：
+
+```
+╔══════════════════════════════════════════════════════╗
+║                                                      ║
+║          Metapi 一键部署                              ║
+║                                                      ║
+╚══════════════════════════════════════════════════════╝
+
+  系统信息
+  ──────────────────────────
+  平台     ubuntu / amd64
+  内存     1024MB
+  磁盘     5000MB 可用
+
+  部署配置
+  ──────────────────────────
+  [1] 安装模式    预编译下载（推荐低配服务器）
+  [2] 访问端口    4000
+  [3] 管理令牌    （未设置，必须填写）
+  [4] 代理令牌    （未设置，必须填写）
+
+  ──────────────────────────
+  [0] 开始安装
+  [q] 退出
+
+  请选择 [0-4, q]:
+```
+
+### 菜单操作
+
+| 选项 | 说明 |
+|------|------|
+| `[1]` 切换安装模式 | 在「预编译下载」和「源码编译」之间切换 |
+| `[2]` 修改端口 | 输入自定义端口号（默认 4000） |
+| `[3]` 设置管理令牌 | 输入 AUTH_TOKEN（管理后台登录密码，**必填**） |
+| `[4]` 设置代理令牌 | 输入 PROXY_TOKEN（下游 API 调用密钥，**必填**） |
+| `[0]` 开始安装 | 令牌设置完成后，选择此项开始自动部署 |
+| `[q]` 退出 | 取消部署 |
+
+### 交互流程
+
+```
+执行命令 → 弹出菜单 → 用户配置选项 → 选 [0] 开始 → 全自动部署 → 完成
+```
+
+**整个过程用户只需：**
+1. 设置两个令牌（AUTH_TOKEN + PROXY_TOKEN）
+2. 按需调整安装模式或端口
+3. 选择开始安装
+
+其余所有步骤自动完成：检测架构、下载预编译包、安装 Node.js、创建用户、配置 Swap、安装服务、启动。
 
 ---
 
@@ -111,13 +149,13 @@ sudo bash metapi-deploy.sh [选项]
 
 | 选项 | 说明 |
 |------|------|
-| （无） | 一键部署（自动检测平台，下载预编译包） |
+| （无） | 交互式菜单部署 |
 | `--source` | 强制源码编译模式 |
 | `--uninstall` | 卸载（保留数据） |
 | `--uninstall-all` | 完整卸载（不保留数据） |
 | `--repair` | 依赖修复 |
-| `--token TOKEN` | 非交互式指定 AUTH_TOKEN |
-| `--proxy-token PT` | 非交互式指定 PROXY_TOKEN |
+| `--token TOKEN` | 指定 AUTH_TOKEN（跳过交互菜单） |
+| `--proxy-token PT` | 指定 PROXY_TOKEN（跳过交互菜单） |
 | `--yes`, `-y` | 非交互式确认 |
 | `--help`, `-h` | 显示帮助 |
 
@@ -125,7 +163,7 @@ sudo bash metapi-deploy.sh [选项]
 
 ## 非交互式部署
 
-适合自动化工具（Ansible、Terraform 等）或批量部署：
+适合自动化工具（Ansible、Terraform 等）或批量部署。指定 `--token` 和 `--proxy-token` 后自动跳过交互菜单：
 
 ```bash
 # 完全非交互
@@ -324,7 +362,7 @@ server {
 | 预编译包无对应架构 | 脚本会自动切换到源码编译模式 |
 | `better-sqlite3` 加载失败 | 架构不匹配，运行 `sudo bash metapi-deploy.sh --repair` |
 | 内存不足 | 脚本会自动配置 Swap，也可手动增加 |
-| 端口被占用 | 脚本会自动选择下一个可用端口 |
+| 端口被占用 | 菜单中修改端口，或脚本自动选择下一个可用端口 |
 | GitHub Release 未找到 | 脚本会自动切换到源码编译，或使用 `--source` 参数 |
 | 更新后服务无法启动 | `journalctl -u metapi -n 50` 查看日志，或 `sudo bash metapi-deploy.sh --repair` |
 | Node.js 安装失败 | 检查网络或手动安装 Node.js 22+ |
