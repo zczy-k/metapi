@@ -335,59 +335,14 @@ docker run -d --name metapi \
 
 </details>
 
-### 裸机轻量部署（低配置服务器推荐）
-
-适用于 **2核1G 及以下** 低配置服务器，相比 Docker 部署省去容器运行时开销（约 50-100MB 内存），预估内存占用仅 ~115-220MB。
-
-**一键安装：**
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/zczy-k/metapi/main/deploy/bare-metal/install.sh | bash -s --
-```
-
-**手动安装：**
-
-```bash
-# 1. 安装 Node.js 22+ 和编译依赖
-# 2. 克隆并构建
-git clone https://github.com/zczy-k/metapi.git /opt/metapi
-cd /opt/metapi
-npm ci --ignore-scripts && npm rebuild esbuild sharp better-sqlite3
-npm run build:web && npm run build:server
-npm prune --omit=dev
-
-# 3. 配置环境变量
-cp deploy/bare-metal/.env.example .env
-# 编辑 .env，设置 AUTH_TOKEN、PROXY_TOKEN 和 NODE_OPTIONS=--max-old-space-size=256
-
-# 4. 启动
-node dist/server/db/migrate.js
-NODE_OPTIONS=--max-old-space-size=256 node dist/server/index.js
-```
-
-> [!TIP]
-> 1G 内存服务器建议：配置 1GB swap、设置 `NODE_OPTIONS=--max-old-space-size=256`、使用 PM2 管理进程自动重启。
-> 详见 [裸机部署文档](deploy/bare-metal/README.md)。
-
 <details>
-<summary><strong>Alpine 精简版 Docker 镜像</strong></summary>
+<summary><strong>裸机轻量部署 / Alpine Docker / 自动更新</strong></summary>
 
-适用于仍希望使用 Docker 但需要更小镜像的场景（移除了 kubectl/helm，基于 Alpine）：
+适用于 **2核1G 及以下** 低配置服务器，详见 [裸机部署完整指南](deploy/bare-metal/DEPLOY-GUIDE.md)：
 
-```bash
-# 构建
-docker build -f docker/Dockerfile.alpine -t metapi:alpine .
-
-# 运行
-docker run -d --name metapi \
-  -p 4000:4000 \
-  -e AUTH_TOKEN=your-admin-token \
-  -e PROXY_TOKEN=your-proxy-sk-token \
-  -e TZ=Asia/Shanghai \
-  -v ./data:/app/data \
-  --restart unless-stopped \
-  metapi:alpine
-```
+- **裸机 Lite** — 省去容器运行时开销，预估内存仅 ~115-220MB
+- **Alpine Docker** — 精简镜像，无 kubectl/helm
+- **自动更新** — systemd timer 定时拉取上游更新并自动重建
 
 </details>
 

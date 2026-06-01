@@ -1,0 +1,230 @@
+# Metapi CI 构建 & 发布预编译 Release
+#
+# 当推送 tag (v*) 或手动触发时：
+#   1. 在 GitHub Actions 上编译（Node.js + npm build）
+#   2. 打包 dist/ + node_modules/ + drizzle/ + package.json
+#   3. 创建 GitHub Release 并上传构建产物
+#
+# 服务器端通过 metapi-deploy.sh / metapi-updater.sh 下载预编译包，
+# 无需在服务器上执行 npm ci / npm run build，大幅降低服务器资源需求。
+
+name: Build & Release
+
+on:
+  # 推送 tag 时自动构建（如 v1.3.0）
+  push:
+    tags:
+      - 'v*'
+
+  # 手动触发（可选择分支）
+  workflow_dispatch:
+    inputs:
+      version_override:
+        description: '版本号（留空则使用 package.json 中的版本）'
+        required: false
+        type: string
+      make_latest:
+        description: '标记为最新 Release'
+        required: false
+        type: boolean
+        default: true
+
+env:
+  NODE_VERSION: '22'
+  REGISTRY: ghcr.io
+
+permissions:
+  contents: write  # 创建 Release 需要
+
+jobs:
+  build:
+    name: 构建 (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - target: linux-amd64
+            runner: ubuntu-latest
+            arch: x64
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: 安装系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3 make g++
+
+      - name: 安装 npm 依赖
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: 重建原生模块
+        run: npm rebuild esbuild sharp better-sqlite3 --no-audit --no-fund
+
+      - name: 构建前端
+        run: npm run build:web
+
+      - name: 构建后端
+        run: npm run build:server
+
+      - name: 清理开发依赖
+        run: npm prune --omit=dev --no-audit --no-fund
+
+      - name: 验证构建产物
+        run: |
+          test -f dist/server/index.js || { echo "ERROR: dist/server/index.js missing"; exit 1; }
+          test -f node_modules/better-sqlite3/build/Release/better_sqlite3.node || { echo "ERROR: better-sqlite3 native module missing"; exit 1; }
+          echo "Build verified OK"
+
+      - name: 打包构建产物
+        run: |
+          VERSION="${{ github.event.inputs.version_override || github.ref_name }}"
+          # 去掉 v 前缀（如果有）
+          VERSION="${VERSION#v}"
+          # 如果没有从 tag 获取到版本，使用 package.json 的版本
+          if [ -z "$VERSION" ]; then
+            VERSION=$(node -p "require('./package.json').version")
+          fi
+
+          ARTIFACT_NAME="metapi-${VERSION}-${{ matrix.target }}"
+
+          mkdir -p "/tmp/${ARTIFACT_NAME}"
+
+          # 复制运行时必需文件
+          cp -r dist "/tmp/${ARTIFACT_NAME}/"
+          cp -r node_modules "/tmp/${ARTIFACT_NAME}/"
+          cp -r drizzle "/tmp/${ARTIFACT_NAME}/"
+          cp package.json "/tmp/${ARTIFACT_NAME}/"
+          cp package-lock.json "/tmp/${ARTIFACT_NAME}/" 2>/dev/null || true
+
+          # 复制部署脚本
+          mkdir -p "/tmp/${ARTIFACT_NAME}/deploy/bare-metal"
+          cp deploy/bare-metal/metapi-deploy.sh "/tmp/${ARTIFACT_NAME}/deploy/bare-metal/" 2>/dev/null || true
+          cp deploy/bare-metal/metapi-updater.sh "/tmp/${ARTIFACT_NAME}/deploy/bare-metal/" 2>/dev/null || true
+          cp deploy/bare-metal/metapi.service "/tmp/${ARTIFACT_NAME}/deploy/bare-metal/" 2>/dev/null || true
+          cp deploy/bare-metal/.env.example "/tmp/${ARTIFACT_NAME}/deploy/bare-metal/" 2>/dev/null || true
+          cp deploy/bare-metal/DEPLOY-GUIDE.md "/tmp/${ARTIFACT_NAME}/deploy/bare-metal/" 2>/dev/null || true
+
+          # 写入版本信息
+          cat > "/tmp/${ARTIFACT_NAME}/.build-info" << EOF
+          version=${VERSION}
+          build_time=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+          commit=${{ github.sha }}
+          target=${{ matrix.target }}
+          node_version=$(node -v)
+          arch=${{ matrix.arch }}
+          EOF
+
+          # 打包
+          cd /tmp
+          tar -czf "${ARTIFACT_NAME}.tar.gz" "${ARTIFACT_NAME}"
+
+          # 移动到工作目录
+          mv "${ARTIFACT_NAME}.tar.gz" "${{ github.workspace }}/"
+
+          echo "artifact_name=${ARTIFACT_NAME}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: metapi-${{ matrix.target }}
+          path: metapi-*.tar.gz
+          retention-days: 30
+
+  release:
+    name: 发布 Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event.inputs.make_latest == 'true'
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 获取版本号
+        id: version
+        run: |
+          VERSION="${{ github.event.inputs.version_override || github.ref_name }}"
+          VERSION="${VERSION#v}"
+          if [ -z "$VERSION" ]; then
+            VERSION=$(node -p "require('./package.json').version")
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: 下载所有构建产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+          merge-multiple: true
+
+      - name: 列出产物
+        run: ls -lh artifacts/
+
+      - name: 生成 Release Notes
+        id: release_notes
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          cat > release_notes.md << 'NOTES'
+          ## 预编译部署包
+
+          适用于低配置服务器（2核1G），**无需在服务器上编译**，直接下载解压即可运行。
+
+          ### 下载对应架构
+
+          | 文件 | 架构 | 适用服务器 |
+          |------|------|-----------|
+          | `metapi-*-linux-amd64.tar.gz` | x86_64 | 普通 VPS / 云服务器 |
+          | `metapi-*-linux-arm64.tar.gz` | ARM64 | 树莓派5 / ARM 云服务器 |
+
+          ### 快速部署
+
+          ```bash
+          # 1. 下载（替换 URL 中的版本号和架构）
+          curl -fsSLO https://github.com/${{ github.repository }}/releases/download/v${VERSION}/metapi-${VERSION}-linux-amd64.tar.gz
+
+          # 2. 解压
+          tar -xzf metapi-${VERSION}-linux-amd64.tar.gz
+
+          # 3. 运行部署脚本
+          sudo bash metapi-${VERSION}-linux-amd64/deploy/bare-metal/metapi-deploy.sh
+
+          # 或手动启动
+          cd metapi-${VERSION}-linux-amd64
+          cp deploy/bare-metal/.env.example .env
+          # 编辑 .env 设置 AUTH_TOKEN 和 PROXY_TOKEN
+          node dist/server/db/migrate.js
+          node dist/server/index.js
+          ```
+
+          ### 自动更新
+
+          部署后启用自动更新，服务器会定期检查新版本并自动下载：
+
+          ```bash
+          sudo bash deploy/bare-metal/metapi-updater.sh --check   # 检查更新
+          sudo bash deploy/bare-metal/metapi-updater.sh            # 执行更新
+          ```
+          NOTES
+
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: v${{ steps.version.outputs.version }}
+          body_path: release_notes.md
+          make_latest: ${{ github.event.inputs.make_latest != 'false' }}
+          files: |
+            artifacts/*.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,14 @@
+[Unit]
+Description=Metapi Auto-Update Timer
+Documentation=https://github.com/zczy-k/metapi
+
+[Timer]
+# 每天凌晨 3 点检查更新
+OnCalendar=*-*-* 03:00:00
+# 如果错过了（如关机），启动后立即执行
+Persistent=true
+# 随机延迟 0-30 分钟，避免所有服务器同时更新
+RandomizedDelaySec=1800
+
+[Install]
+WantedBy=timers.target

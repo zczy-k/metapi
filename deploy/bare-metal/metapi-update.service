@@ -1,0 +1,19 @@
+[Unit]
+Description=Metapi Auto-Update Service
+Documentation=https://github.com/zczy-k/metapi
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/metapi/deploy/bare-metal/metapi-updater.sh --yes
+User=root
+WorkingDirectory=/opt/metapi
+
+# 安全限制
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/metapi /var/log/metapi /var/backups/metapi
+ProtectHome=true
+PrivateTmp=true
+
+# 超时（构建可能耗时较长）
+TimeoutStartSec=600
