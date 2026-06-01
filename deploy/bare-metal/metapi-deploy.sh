@@ -70,6 +70,35 @@ log()     { local lvl="$1"; shift; echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$lvl] $
 separator() { echo -e "${CYAN}──────────────────────────────────────────────────────────${NC}"; }
 
 # ═══════════════════════════════════════════════════════════
+# 终端清理（退出/中断时调用）
+# ═══════════════════════════════════════════════════════════
+cleanup_terminal() {
+  printf '\033[?25h'          # 显示光标
+  printf '\033[0m'            # 重置属性
+  stty echo 2>/dev/null      # 确保回显开启
+  [ -t 0 ] && tput rmcup 2>/dev/null  # 恢复前屏幕内容（可选）
+  clear 2>/dev/null
+}
+
+# SIGINT 捕获：防止 Ctrl+C 弄乱终端
+trap_cleanup() {
+  printf '\033[?25h'
+  printf '\033[0m'
+  stty echo 2>/dev/null
+  echo -e "\n  ${YELLOW}操作已取消，返回菜单...${NC}"
+}
+
+# 注册陷阱（仅在交互菜单运行时生效）
+register_trap() {
+  trap 'trap_cleanup' INT
+  trap 'trap_cleanup' TSTP
+}
+
+deregister_trap() {
+  trap - INT TSTP
+}
+
+# ═══════════════════════════════════════════════════════════
 # 命令行参数解析
 # ═══════════════════════════════════════════════════════════
 parse_args() {
@@ -696,6 +725,8 @@ show_firewall_hint() {
 # 交互式主菜单
 # ═══════════════════════════════════════════════════════════
 show_interactive_menu() {
+  register_trap
+
   local arch; arch=$(detect_arch)
   local os; os=$(detect_os)
   local mem_mb; mem_mb=$(get_memory_mb)
@@ -709,6 +740,15 @@ show_interactive_menu() {
 
   # 当前菜单页：main / install
   local menu_page="main"
+
+  # 按回车继续（带 trap 保护，Ctrl+C 不弄乱终端）
+  # 用法: wait_return; choice 变量会被设为 "ctrlc" 如果是 Ctrl+C 触发的
+  wait_return() {
+    local r
+    deregister_trap
+    read -r r
+    register_trap
+  }
 
   clear
 
@@ -791,19 +831,24 @@ show_interactive_menu() {
           ;;
         2)
           printf '\033[?25h'
+          deregister_trap
           show_status_info
           echo ""
-          read -rp "  按回车返回菜单..."
+          echo -e "  ${DIM}按回车返回菜单...${NC}"
+          wait_return
           ;;
         3)
           printf '\033[?25h'
+          deregister_trap
           do_repair
           echo ""
-          read -rp "  按回车返回菜单..."
+          echo -e "  ${DIM}按回车返回菜单...${NC}"
+          wait_return
           ;;
         4)
           if [ "$is_installed" = "yes" ]; then
             printf '\033[?25h'
+            deregister_trap
             if [ "$svc_status" = "运行中" ]; then
               echo -e "  ${YELLOW}重启服务中...${NC}"
               systemctl restart "${SERVICE_NAME}" 2>/dev/null
@@ -822,12 +867,14 @@ show_interactive_menu() {
               fi
             fi
             echo ""
-            read -rp "  按回车返回菜单..."
+            echo -e "  ${DIM}按回车返回菜单...${NC}"
+            wait_return
           fi
           ;;
         5)
           if [ "$is_installed" = "yes" ] && [ "$svc_status" = "运行中" ]; then
             printf '\033[?25h'
+            deregister_trap
             echo -e "  ${YELLOW}停止服务中...${NC}"
             systemctl stop "${SERVICE_NAME}" 2>/dev/null
             if ! systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
@@ -836,37 +883,43 @@ show_interactive_menu() {
               echo -e "  ${RED}服务停止失败${NC}"
             fi
             echo ""
-            read -rp "  按回车返回菜单..."
+            echo -e "  ${DIM}按回车返回菜单...${NC}"
+            wait_return
           fi
           ;;
         6)
           if [ "$is_installed" = "yes" ]; then
             printf '\033[?25h'
+            deregister_trap
             echo ""
             echo -e "  ${YELLOW}确认卸载（保留数据）？[y/N]${NC}"
             read -rp "  " confirm
             if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
               do_uninstall
               echo ""
-              read -rp "  按回车返回菜单..."
+              echo -e "  ${DIM}按回车返回菜单...${NC}"
+              wait_return
             fi
           fi
           ;;
         7)
           if [ "$is_installed" = "yes" ]; then
             printf '\033[?25h'
+            deregister_trap
             echo ""
             echo -e "  ${RED}⚠ 完整卸载将删除所有数据！确认？[y/N]${NC}"
             read -rp "  " confirm
             if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
               do_uninstall_all
               echo ""
-              read -rp "  按回车返回菜单..."
+              echo -e "  ${DIM}按回车返回菜单...${NC}"
+              wait_return
             fi
           fi
           ;;
         q|Q)
-          printf '\033[?25h'
+          deregister_trap
+          cleanup_terminal
           echo -e "  ${YELLOW}已退出${NC}"
           exit 0
           ;;
@@ -920,44 +973,51 @@ show_interactive_menu() {
           fi
           ;;
         2)
+          deregister_trap
           read -rp "  请输入端口号 (1-65535): " new_port
+          register_trap
           if [[ "$new_port" =~ ^[0-9]+$ ]] && [ "$new_port" -ge 1 ] && [ "$new_port" -le 65535 ]; then
             menu_port="$new_port"
           else
             echo -e "  ${RED}无效端口号，按回车继续...${NC}"
-            read -r
+            deregister_trap; read -r; register_trap
           fi
           ;;
         3)
           echo -e "  ${YELLOW}管理令牌 = 管理后台登录密码${NC}"
+          deregister_trap
           read -rp "  请输入: " new_token
+          register_trap
           if [ -n "$new_token" ] && [ "$new_token" != "change-me-admin-token" ]; then
             menu_auth_token="$new_token"
           else
             echo -e "  ${RED}令牌不能为空或使用默认值，按回车继续...${NC}"
-            read -r
+            deregister_trap; read -r; register_trap
           fi
           ;;
         4)
           echo -e "  ${YELLOW}代理令牌 = 下游 API 调用密钥${NC}"
+          deregister_trap
           read -rp "  请输入: " new_proxy
+          register_trap
           if [ -n "$new_proxy" ] && [ "$new_proxy" != "change-me-proxy-sk-token" ]; then
             menu_proxy_token="$new_proxy"
           else
             echo -e "  ${RED}令牌不能为空或使用默认值，按回车继续...${NC}"
-            read -r
+            deregister_trap; read -r; register_trap
           fi
           ;;
         0)
           if [ "$can_start" = "no" ]; then
             echo -e "  ${RED}请先设置管理令牌和代理令牌！按回车继续...${NC}"
-            read -r
+            deregister_trap; read -r; register_trap
             continue
           fi
           INSTALL_MODE="$menu_install_mode"
           ACTUAL_PORT="$menu_port"
           CLI_AUTH_TOKEN="$menu_auth_token"
           CLI_PROXY_TOKEN="$menu_proxy_token"
+          deregister_trap
           printf '\033[?25h'
           return 0
           ;;
@@ -965,7 +1025,8 @@ show_interactive_menu() {
           menu_page="main"
           ;;
         q|Q)
-          printf '\033[?25h'
+          deregister_trap
+          cleanup_terminal
           echo -e "  ${YELLOW}已退出${NC}"
           exit 0
           ;;
