@@ -707,18 +707,33 @@ start_service() {
   systemctl start "${SERVICE_NAME}"
 
   local retry=0
-  while [ $retry -lt 20 ]; do
+  while [ $retry -lt 30 ]; do
     if systemctl is-active "${SERVICE_NAME}" &>/dev/null; then
-      success "服务启动成功"
-      return 0
+      if curl -sf --connect-timeout 2 "http://127.0.0.1:${ACTUAL_PORT}" >/dev/null 2>&1; then
+        success "服务启动成功 (端口 ${ACTUAL_PORT} 已响应)"
+        return 0
+      fi
+    else
+      error "服务启动后异常退出"
+      echo ""
+      journalctl -u "${SERVICE_NAME}" -n 30 --no-pager 2>/dev/null
+      return 1
     fi
     retry=$((retry + 1)); sleep 1
   done
 
-  error "服务启动失败"
-  echo ""
-  journalctl -u "${SERVICE_NAME}" -n 30 --no-pager 2>/dev/null
-  return 1
+  if systemctl is-active "${SERVICE_NAME}" &>/dev/null; then
+    warn "服务已运行但端口 ${ACTUAL_PORT} 暂未响应"
+    warn "可能原因: 应用仍在初始化数据库"
+    echo ""
+    journalctl -u "${SERVICE_NAME}" -n 15 --no-pager 2>/dev/null
+    return 0
+  else
+    error "服务启动失败"
+    echo ""
+    journalctl -u "${SERVICE_NAME}" -n 30 --no-pager 2>/dev/null
+    return 1
+  fi
 }
 
 show_firewall_hint() {
