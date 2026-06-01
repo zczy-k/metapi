@@ -43,7 +43,15 @@ error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; log "ERROR" "$*"; }
 success() { echo -e "${GREEN}[OK]${NC} $*"; log "OK" "$*"; }
 log()     { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$1] $*" >> "${UPDATE_LOG}" 2>/dev/null || true; }
 
-separator() { echo -e "${CYAN}──────────────────────────────────────────────────────────${NC}"; }
+separator() { echo -e "${CYAN}──────────────────────────────────────────${NC}"; }
+
+prompt_read() {
+  if [ -t 0 ] || [ -e /dev/tty ]; then
+    read -rp "$1" "$2" < /dev/tty
+  else
+    read -rp "$1" "$2"
+  fi
+}
 
 # ═══════════════════════════════════════════════════════════
 # 参数解析
@@ -559,7 +567,7 @@ do_update() {
   # 确认
   if [ "${AUTO_YES}" = false ]; then
     echo ""
-    read -rp "是否执行更新？[y/N] " yn
+    prompt_read "是否执行更新？[y/N] " yn
     [[ "$yn" != "y" && "$yn" != "Y" ]] && { info "已取消"; exit 0; }
   fi
 

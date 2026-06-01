@@ -67,10 +67,25 @@ success() { echo -e "${GREEN}[OK]${NC} $*"; log "OK" "$*"; }
 step()    { echo -e "${CYAN}[>>>]${NC} $*"; log "STEP" "$*"; }
 log()     { local lvl="$1"; shift; echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$lvl] $*" >> "${LOG_FILE}" 2>/dev/null || true; }
 
-separator() { echo -e "${CYAN}──────────────────────────────────────────────────────────${NC}"; }
+separator() { echo -e "${CYAN}──────────────────────────────────────────${NC}"; }
 
 prompt_read() {
-  read -rp "$1" "$2" < /dev/tty
+  if [ -t 0 ] || [ -e /dev/tty ]; then
+    read -rp "$1" "$2" < /dev/tty
+  else
+    read -rp "$1" "$2"
+  fi
+}
+
+prompt_read_silent() {
+  if [ -t 0 ] || [ -e /dev/tty ]; then
+    stty -echo < /dev/tty
+    read -rp "$1" "$2" < /dev/tty
+    stty echo < /dev/tty
+  else
+    read -rp "$1" "$2"
+  fi
+  echo ""
 }
 
 # ═══════════════════════════════════════════════════════════
@@ -183,7 +198,7 @@ show_failure_report() {
   echo -e "    服务: ${CYAN}journalctl -u ${SERVICE_NAME} -n 50 --no-pager${NC}"
 
   echo ""
-  echo -e "  ${CYAN}修复建议: sudo bash $0 --repair${NC}"
+  echo -e "  ${CYAN}修复建议: sudo bash ${SCRIPT_URL} --repair${NC}"
   echo ""
 }
 
@@ -193,6 +208,12 @@ show_failure_report() {
 preflight_check() {
   if [ "$(id -u)" -ne 0 ]; then
     error "需要 root 权限，请使用: sudo bash $0"
+    exit 1
+  fi
+
+  if ! command -v apt-get &>/dev/null; then
+    error "当前系统不支持 apt-get，本脚本仅适用于 Debian/Ubuntu 系列"
+    error "如需在其他系统部署，请使用 Docker 方式"
     exit 1
   fi
 
@@ -209,7 +230,7 @@ detect_arch() {
   case "$arch" in
     x86_64|amd64) echo "amd64" ;;
     aarch64|arm64) echo "arm64" ;;
-    armv7l|armhf)  echo "armv7" ;;
+    armv7l|armhf)  echo "armv7l" ;;
     *)             echo "unknown" ;;
   esac
 }
@@ -265,7 +286,7 @@ get_release_asset_url() {
 # ═══════════════════════════════════════════════════════════
 # 端口自动检测
 # ═══════════════════════════════════════════════════════════
-port_in_use() { ss -tlnp 2>/dev/null | grep -q ":${1} "; }
+port_in_use() { ss -tlnp 2>/dev/null | grep -qP ":${1}\b"; }
 
 find_available_port() {
   local port="$1"
@@ -445,6 +466,8 @@ download_prebuilt() {
 # 源码编译
 # ═══════════════════════════════════════════════════════════
 clone_and_build() {
+  local orig_dir; orig_dir="$(pwd)"
+
   info "克隆代码到 ${APP_DIR}..."
 
   if [ -d "${APP_DIR}/.git" ]; then
@@ -465,21 +488,22 @@ clone_and_build() {
     warn "npm ci 失败 (尝试 ${retry}/3)"
     [ $retry -lt 3 ] && sleep 5
   done
-  [ $retry -ge 3 ] && { error "npm ci 失败"; return 1; }
+  [ $retry -ge 3 ] && { error "npm ci 失败"; cd "${orig_dir}"; return 1; }
 
   info "重建原生模块..."
   npm rebuild esbuild sharp better-sqlite3 --no-audit --no-fund 2>&1 | tail -5
 
   info "构建前端..."
-  npm run build:web 2>&1 | tail -5 || { error "前端构建失败"; return 1; }
+  npm run build:web 2>&1 | tail -5 || { error "前端构建失败"; cd "${orig_dir}"; return 1; }
 
   info "构建后端..."
-  npm run build:server 2>&1 | tail -5 || { error "后端构建失败"; return 1; }
+  npm run build:server 2>&1 | tail -5 || { error "后端构建失败"; cd "${orig_dir}"; return 1; }
 
   npm prune --omit=dev --no-audit --no-fund 2>&1 | tail -3
 
-  [ ! -f "${APP_DIR}/dist/server/index.js" ] && { error "构建验证失败"; return 1; }
+  [ ! -f "${APP_DIR}/dist/server/index.js" ] && { error "构建验证失败"; cd "${orig_dir}"; return 1; }
 
+  cd "${orig_dir}"
   success "源码编译完成"
 }
 
@@ -505,7 +529,16 @@ create_user() {
 # ═══════════════════════════════════════════════════════════
 configure_env() {
   if [ -f "${ENV_FILE}" ]; then
-    info ".env 已存在，保留当前配置"
+    info ".env 已存在，更新配置..."
+
+    if [ -n "${CLI_AUTH_TOKEN}" ]; then
+      sed -i "s|^AUTH_TOKEN=.*|AUTH_TOKEN=${CLI_AUTH_TOKEN}|" "${ENV_FILE}"
+    fi
+    if [ -n "${CLI_PROXY_TOKEN}" ]; then
+      sed -i "s|^PROXY_TOKEN=.*|PROXY_TOKEN=${CLI_PROXY_TOKEN}|" "${ENV_FILE}"
+    fi
+    sed -i "s|^PORT=.*|PORT=${ACTUAL_PORT}|" "${ENV_FILE}"
+
     local configured_port; configured_port=$(grep "^PORT=" "${ENV_FILE}" 2>/dev/null | cut -d= -f2)
     [ -n "$configured_port" ] && ACTUAL_PORT="$configured_port"
     return 0
@@ -589,6 +622,7 @@ install_systemd_service() {
       [[ "$key" =~ ^[[:space:]]*#.*$ ]] && continue
       [[ -z "$key" ]] && continue
       key=$(echo "$key" | xargs); [[ -z "$key" ]] && continue
+      [[ "$key" = "NODE_OPTIONS" ]] && continue
       env_block+="Environment=${key}=${value}"$'\n'
     done < "${ENV_FILE}"
   fi
@@ -654,8 +688,14 @@ set_permissions() {
 # 写入安装标记
 # ═══════════════════════════════════════════════════════════
 write_marker() {
+  local current_version="unknown"
+  if [ -f "${APP_DIR}/.build-info" ]; then
+    current_version=$(grep '^version=' "${APP_DIR}/.build-info" 2>/dev/null | cut -d= -f2 || echo "unknown")
+  fi
+
   cat > "${MARKER_FILE}" << EOF
 version=${MARKER_VERSION}
+app_version=${current_version}
 install_time=$(date '+%Y-%m-%d %H:%M:%S')
 node_version=$(node -v 2>/dev/null || echo "unknown")
 arch=$(detect_arch)
@@ -727,20 +767,19 @@ show_interactive_menu() {
 
   local arch; arch=$(detect_arch)
   local os; os=$(detect_os)
-  local mem_mb; mem_mb=$(get_memory_mb)
-  local disk_mb; disk_mb=$(get_disk_mb)
 
-  # 安装配置变量
   local menu_install_mode="${INSTALL_MODE}"
   local menu_port="${ACTUAL_PORT}"
   local menu_auth_token="${CLI_AUTH_TOKEN}"
   local menu_proxy_token="${CLI_PROXY_TOKEN}"
 
-  # 当前菜单页：main / install
   local menu_page="main"
+  local choice=""
 
   while true; do
-    # 动态刷新安装状态和服务状态
+    local mem_mb; mem_mb=$(get_memory_mb)
+    local disk_mb; disk_mb=$(get_disk_mb)
+
     local is_installed="no"
     [ -f "${MARKER_FILE}" ] && is_installed="yes"
 
@@ -780,7 +819,7 @@ show_interactive_menu() {
           echo -e "  ${GREEN}5)${NC} 停止服务"
         else
           echo -e "  ${GREEN}4)${NC} 启动服务"
-          echo -e "  ${GREEN}5)${NC} 停止服务  ${DIM}(服务已停止)${NC}"
+          echo -e "  ${DIM}5) 停止服务（服务已停止）${NC}"
         fi
         echo -e "  ${GREEN}6)${NC} 卸载（保留数据）"
         echo -e "  ${GREEN}7)${NC} 完整卸载（删除数据）"
@@ -989,7 +1028,7 @@ show_interactive_menu() {
         3)
           echo -e "  ${YELLOW}管理令牌 = 管理后台登录密码${NC}"
           deregister_trap
-          prompt_read "  请输入: " new_token
+          prompt_read_silent "  请输入: " new_token
           register_trap
           if [ -n "$new_token" ] && [ "$new_token" != "change-me-admin-token" ]; then
             menu_auth_token="$new_token"
@@ -1002,7 +1041,7 @@ show_interactive_menu() {
         4)
           echo -e "  ${YELLOW}代理令牌 = 下游 API 调用密钥${NC}"
           deregister_trap
-          prompt_read "  请输入: " new_proxy
+          prompt_read_silent "  请输入: " new_proxy
           register_trap
           if [ -n "$new_proxy" ] && [ "$new_proxy" != "change-me-proxy-sk-token" ]; then
             menu_proxy_token="$new_proxy"
@@ -1022,6 +1061,21 @@ show_interactive_menu() {
           ACTUAL_PORT="$menu_port"
           CLI_AUTH_TOKEN="$menu_auth_token"
           CLI_PROXY_TOKEN="$menu_proxy_token"
+
+          echo ""
+          echo -e "  ${BOLD}── 安装摘要 ──${NC}"
+          local mode_label="预编译下载"
+          [ "$INSTALL_MODE" = "source" ] && mode_label="源码编译"
+          echo -e "  安装模式:  ${CYAN}${mode_label}${NC}"
+          echo -e "  访问端口:  ${CYAN}${ACTUAL_PORT}${NC}"
+          echo -e "  管理令牌:  ${CYAN}已设置${NC}"
+          echo -e "  代理令牌:  ${CYAN}已设置${NC}"
+          echo ""
+          prompt_read "  确认开始安装？[Y/n]: " confirm_start
+          if [ "$confirm_start" = "n" ] || [ "$confirm_start" = "N" ]; then
+            continue
+          fi
+
           deregister_trap
           return 0
           ;;
@@ -1059,6 +1113,8 @@ show_status_info() {
   # 安装信息
   local install_mode; install_mode=$(grep '^install_mode=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2 || echo "未知")
   local install_time; install_time=$(grep '^install_time=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2 || echo "未知")
+  local app_version; app_version=$(grep '^app_version=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2 || echo "未知")
+  echo -e "  应用版本:  ${BOLD}${app_version}${NC}"
   echo -e "  安装模式:  ${BOLD}${install_mode}${NC}"
   echo -e "  安装时间:  ${BOLD}${install_time}${NC}"
 
@@ -1108,6 +1164,15 @@ do_install() {
   # 显示交互菜单（非交互模式跳过）
   if [ "$SKIP_MENU" -eq 0 ]; then
     show_interactive_menu
+  else
+    if [ -z "${CLI_AUTH_TOKEN}" ]; then
+      error "非交互模式必须通过 --token 指定管理令牌"
+      return 1
+    fi
+    if [ -z "${CLI_PROXY_TOKEN}" ]; then
+      error "非交互模式必须通过 --proxy-token 指定代理令牌"
+      return 1
+    fi
   fi
 
   echo ""
@@ -1348,6 +1413,9 @@ do_upgrade() {
     return 1
   fi
 
+  local current_version; current_version=$(grep '^app_version=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2)
+  [ -z "$current_version" ] && current_version="未知"
+
   local arch; arch=$(detect_arch)
   if [ "$arch" = "unknown" ]; then
     error "无法识别系统架构 ($(uname -m))"
@@ -1366,7 +1434,14 @@ do_upgrade() {
     error "无法解析最新版本号"
     return 1
   fi
+
+  echo -e "  当前版本: ${CYAN}${current_version}${NC}"
   info "最新版本: ${latest_version}"
+
+  if [ "$current_version" = "$latest_version" ]; then
+    info "已是最新版本，无需升级"
+    return 0
+  fi
 
   local download_url; download_url=$(get_release_asset_url "$release_info" "$arch")
   if [ -z "$download_url" ]; then
@@ -1427,7 +1502,7 @@ do_upgrade() {
   # 更新标记、权限、重启
   write_marker
   chown -R "${APP_USER}:${APP_USER}" "${APP_DIR}" 2>/dev/null || true
-  systemctl daemon-reload
+  install_systemd_service
   systemctl start "${SERVICE_NAME}"
 
   if systemctl is-active --quiet "${SERVICE_NAME}"; then
