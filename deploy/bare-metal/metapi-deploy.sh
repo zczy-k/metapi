@@ -325,43 +325,31 @@ configure_nginx_proxy() {
 
   info "写入 Nginx 反向代理配置..."
 
-  if [ -n "$domain" ]; then
-    cat > "${NGINX_METAPI_CONF}" << NGINX_EOF
-server {
-    listen ${listen_port};
-    server_name ${domain};
-
-    location / {
-        proxy_pass http://127.0.0.1:${upstream_port};
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_read_timeout 300s;
-        proxy_buffering off;
-        proxy_cache off;
-    }
-}
-NGINX_EOF
-  else
-    cat > "${NGINX_METAPI_CONF}" << NGINX_EOF
-server {
-    listen ${listen_port};
-    server_name _;
-
-    location / {
-        proxy_pass http://127.0.0.1:${upstream_port};
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_read_timeout 300s;
-        proxy_buffering off;
-        proxy_cache off;
-    }
-}
-NGINX_EOF
-  fi
+  {
+    echo "server {"
+    if [ -n "$domain" ]; then
+      echo "    listen 80;"
+      echo "    server_name ${domain};"
+      if [ "$listen_port" != "80" ]; then
+        echo "    listen ${listen_port};"
+      fi
+    else
+      echo "    listen ${listen_port};"
+      echo "    server_name _;"
+    fi
+    echo ""
+    echo "    location / {"
+    echo "        proxy_pass http://127.0.0.1:${upstream_port};"
+    echo "        proxy_set_header Host \$host;"
+    echo "        proxy_set_header X-Real-IP \$remote_addr;"
+    echo "        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;"
+    echo "        proxy_set_header X-Forwarded-Proto \$scheme;"
+    echo "        proxy_read_timeout 300s;"
+    echo "        proxy_buffering off;"
+    echo "        proxy_cache off;"
+    echo "    }"
+    echo "}"
+  } > "${NGINX_METAPI_CONF}"
 
   ln -sf "${NGINX_METAPI_CONF}" "${NGINX_METAPI_ENABLED}"
 
