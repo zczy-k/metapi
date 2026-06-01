@@ -53,7 +53,7 @@ warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; log "WARN" "$*"; }
 error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; log "ERROR" "$*"; }
 success() { echo -e "${GREEN}[OK]${NC} $*"; log "OK" "$*"; }
 step()    { echo -e "${CYAN}[>>>]${NC} $*"; log "STEP" "$*"; }
-log()     { local lvl="$1"; shift; echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$lvl] $*" >> "${LOG_FILE}" 2>/dev/null || true; }
+log() { local lvl="$1"; shift; [ -d "${LOG_DIR}" ] || mkdir -p "${LOG_DIR}"; echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$lvl] $*" >> "${LOG_FILE}" 2>/dev/null || true; }
 
 separator() { echo -e "${CYAN}──────────────────────────────────────────${NC}"; }
 
@@ -617,17 +617,6 @@ install_systemd_service() {
   local node_path; node_path=$(which node)
   local mem_limit; mem_limit=$(get_memory_limit)
 
-  local env_block=""
-  if [ -f "${ENV_FILE}" ]; then
-    while IFS='=' read -r key value; do
-      [[ "$key" =~ ^[[:space:]]*#.*$ ]] && continue
-      [[ -z "$key" ]] && continue
-      key=$(echo "$key" | xargs); [[ -z "$key" ]] && continue
-      [[ "$key" = "NODE_OPTIONS" ]] && continue
-      env_block+="Environment=${key}=${value}"$'\n'
-    done < "${ENV_FILE}"
-  fi
-
   cat > "${SERVICE_FILE}" << EOF
 [Unit]
 Description=Metapi - AI API Aggregation Gateway
@@ -641,9 +630,8 @@ Group=${APP_USER}
 WorkingDirectory=${APP_DIR}
 
 Environment=NODE_ENV=production
-Environment=DATA_DIR=${DATA_DIR}
 Environment=NODE_OPTIONS=--max-old-space-size=${mem_limit}
-${env_block}
+EnvironmentFile=-${ENV_FILE}
 ExecStartPre=${node_path} dist/server/db/migrate.js
 ExecStart=${node_path} dist/server/index.js
 
