@@ -900,13 +900,6 @@ show_interactive_menu() {
   local arch; arch=$(detect_arch)
   local os; os=$(detect_os)
 
-  local menu_port="${ACTUAL_PORT}"
-  local menu_auth_token="${CLI_AUTH_TOKEN}"
-  local menu_proxy_token="${CLI_PROXY_TOKEN}"
-  local menu_domain="${DOMAIN_NAME}"
-  local menu_listen_port="${DOMAIN_LISTEN_PORT}"
-  local menu_cert_email="${CERTBOT_EMAIL}"
-
   local menu_page="main"
   local choice=""
 
@@ -970,23 +963,9 @@ show_interactive_menu() {
 
       case "$choice" in
         1)
-          if [ "$is_installed" = "yes" ] && [ -f "${ENV_FILE}" ]; then
-            local env_port; env_port=$(grep '^PORT=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2)
-            [ -n "$env_port" ] && menu_port="$env_port"
-            local env_auth; env_auth=$(grep '^AUTH_TOKEN=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2)
-            [ -n "$env_auth" ] && menu_auth_token="$env_auth"
-            local env_proxy; env_proxy=$(grep '^PROXY_TOKEN=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2)
-            [ -n "$env_proxy" ] && menu_proxy_token="$env_proxy"
-          fi
-          if [ "$is_installed" = "yes" ] && [ -f "${MARKER_FILE}" ]; then
-            local mk_domain; mk_domain=$(grep '^domain=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2)
-            [ -n "$mk_domain" ] && menu_domain="$mk_domain"
-            local mk_listen_port; mk_listen_port=$(grep '^listen_port=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2)
-            [ -n "$mk_listen_port" ] && menu_listen_port="$mk_listen_port"
-            local mk_cert_email; mk_cert_email=$(grep '^cert_email=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2)
-            [ -n "$mk_cert_email" ] && menu_cert_email="$mk_cert_email"
-          fi
-          menu_page="install"
+          deregister_trap
+          _installation_wizard
+          register_trap
           ;;
         2)
           deregister_trap
@@ -1115,175 +1094,6 @@ show_interactive_menu() {
           ;;
       esac
 
-    elif [ "$menu_page" = "install" ]; then
-      echo -e "  ${CYAN}部署配置${NC}"
-      echo ""
-
-      local port_info="${menu_port}"
-      port_in_use "$menu_port" && port_info="${menu_port} ${RED}(端口已占用)${NC}"
-      echo -e "  ${GREEN}1)${NC} Metapi 端口:  ${BOLD}${port_info}${NC}"
-
-      if [ -n "$menu_auth_token" ]; then
-        local masked_auth="${menu_auth_token:0:4}****${menu_auth_token: -4}"
-        [ ${#menu_auth_token} -le 8 ] && masked_auth="****"
-        echo -e "  ${GREEN}2)${NC} 管理令牌:  ${BOLD}${masked_auth}${NC}"
-      else
-        echo -e "  ${GREEN}2)${NC} 管理令牌:  ${RED}（未设置，必填）${NC}"
-      fi
-
-      if [ -n "$menu_proxy_token" ]; then
-        local masked_proxy="${menu_proxy_token:0:4}****${menu_proxy_token: -4}"
-        [ ${#menu_proxy_token} -le 8 ] && masked_proxy="****"
-        echo -e "  ${GREEN}3)${NC} 代理令牌:  ${BOLD}${masked_proxy}${NC}"
-      else
-        echo -e "  ${GREEN}3)${NC} 代理令牌:  ${RED}（未设置，必填）${NC}"
-      fi
-
-      if [ -n "$menu_domain" ]; then
-        echo -e "  ${GREEN}4)${NC} 域名:       ${BOLD}${menu_domain}${NC}"
-      else
-        echo -e "  ${GREEN}4)${NC} 域名:       ${DIM}（留空则仅 IP 访问）${NC}"
-      fi
-
-      local lp_info="${menu_listen_port}"
-      echo -e "  ${GREEN}5)${NC} 外部端口:  ${BOLD}${lp_info:-${DIM}（默认 443 或 4000）${NC}}"
-
-      if [ -n "$menu_cert_email" ]; then
-        echo -e "  ${GREEN}6)${NC} 证书邮箱:  ${BOLD}${menu_cert_email}${NC}"
-      else
-        echo -e "  ${GREEN}6)${NC} 证书邮箱:  ${DIM}（留空不自动申请证书）${NC}"
-      fi
-
-      local can_start="yes"
-      [ -z "$menu_auth_token" ] && can_start="no"
-      [ -z "$menu_proxy_token" ] && can_start="no"
-
-      echo ""
-      echo -e "  ${CYAN}0)${NC} 开始安装"
-      echo -e "  ${CYAN}b)${NC} 返回主菜单"
-      echo ""
-      prompt_read "  请输入 [0-6, b]: " choice
-      echo ""
-
-      case "$choice" in
-        1)
-          deregister_trap
-          prompt_read "  Metapi 内部端口 [1-65535]: " new_port
-          register_trap
-          if [[ "$new_port" =~ ^[0-9]+$ ]] && [ "$new_port" -ge 1 ] && [ "$new_port" -le 65535 ]; then
-            menu_port="$new_port"
-            echo -e "  ${GREEN}内部端口已更新为 ${menu_port}${NC}"
-          else
-            echo -e "  ${RED}无效端口号${NC}"
-          fi
-          prompt_read "  按回车键继续" _
-          ;;
-        2)
-          echo -e "  ${YELLOW}管理令牌 = 管理后台登录密码${NC}"
-          deregister_trap
-          prompt_read_silent "  请输入: " new_token
-          register_trap
-          if [ -n "$new_token" ] && [ "$new_token" != "change-me-admin-token" ]; then
-            menu_auth_token="$new_token"
-            echo -e "  ${GREEN}管理令牌已设置${NC}"
-          else
-            echo -e "  ${RED}令牌不能为空或使用默认值${NC}"
-          fi
-          prompt_read "  按回车键继续" _
-          ;;
-        3)
-          echo -e "  ${YELLOW}代理令牌 = 下游 API 调用密钥${NC}"
-          deregister_trap
-          prompt_read_silent "  请输入: " new_proxy
-          register_trap
-          if [ -n "$new_proxy" ] && [ "$new_proxy" != "change-me-proxy-sk-token" ]; then
-            menu_proxy_token="$new_proxy"
-            echo -e "  ${GREEN}代理令牌已设置${NC}"
-          else
-            echo -e "  ${RED}令牌不能为空或使用默认值${NC}"
-          fi
-          prompt_read "  按回车键继续" _
-          ;;
-        4)
-          deregister_trap
-          prompt_read "  输入域名（如 api.example.com，留空取消）: " new_domain
-          register_trap
-          if [ -n "$new_domain" ]; then
-            menu_domain="$new_domain"
-            [ -z "$menu_listen_port" ] && menu_listen_port="443"
-            echo -e "  ${GREEN}域名已设置为 ${menu_domain}${NC}"
-          else
-            menu_domain=""
-            menu_listen_port=""
-            echo -e "  ${GREEN}域名已取消${NC}"
-          fi
-          prompt_read "  按回车键继续" _
-          ;;
-        5)
-          deregister_trap
-          prompt_read "  外部访问端口 [1-65535]（设置域名后 443，仅 IP 访问则 4000）: " new_lp
-          register_trap
-          if [[ "$new_lp" =~ ^[0-9]+$ ]] && [ "$new_lp" -ge 1 ] && [ "$new_lp" -le 65535 ]; then
-            menu_listen_port="$new_lp"
-            echo -e "  ${GREEN}外部端口已更新为 ${menu_listen_port}${NC}"
-          else
-            echo -e "  ${RED}无效端口号${NC}"
-          fi
-          prompt_read "  按回车键继续" _
-          ;;
-        6)
-          deregister_trap
-          prompt_read "  输入邮箱（用于 Let's Encrypt 证书通知，留空则注册不接收邮件）: " new_email
-          register_trap
-          menu_cert_email="$new_email"
-          echo -e "  ${GREEN}邮箱已设置${NC}"
-          prompt_read "  按回车键继续" _
-          ;;
-        0)
-          if [ "$can_start" = "no" ]; then
-            echo -e "  ${RED}请先设置管理令牌和代理令牌！${NC}"
-            prompt_read "  按回车键继续" _
-            continue
-          fi
-          ACTUAL_PORT="$menu_port"
-          CLI_AUTH_TOKEN="$menu_auth_token"
-          CLI_PROXY_TOKEN="$menu_proxy_token"
-          DOMAIN_NAME="$menu_domain"
-          DOMAIN_LISTEN_PORT="${menu_listen_port:-${DOMAIN_NAME:+443}}"
-          [ -z "$DOMAIN_LISTEN_PORT" ] && DOMAIN_LISTEN_PORT="$ACTUAL_PORT"
-          CERTBOT_EMAIL="$menu_cert_email"
-
-          echo ""
-          echo -e "  ${BOLD}── 安装摘要 ──${NC}"
-          echo -e "  Metapi 端口: ${CYAN}${ACTUAL_PORT}${NC}"
-          if [ -n "$DOMAIN_NAME" ]; then
-            echo -e "  域名:       ${CYAN}${DOMAIN_NAME}:${DOMAIN_LISTEN_PORT}${NC}"
-          fi
-          echo -e "  管理令牌:   ${CYAN}已设置${NC}"
-          echo -e "  代理令牌:   ${CYAN}已设置${NC}"
-          echo ""
-          prompt_read "  确认开始安装？[Y/n]: " confirm_start
-          if [ "$confirm_start" = "n" ] || [ "$confirm_start" = "N" ]; then
-            continue
-          fi
-
-          deregister_trap
-          return 0
-          ;;
-        b|B)
-          menu_page="main"
-          ;;
-        q|Q)
-          deregister_trap
-          cleanup_terminal
-          echo -e "  ${YELLOW}已退出${NC}"
-          exit 0
-          ;;
-        *)
-          echo -e "  ${RED}无效选择，请重新输入${NC}"
-          prompt_read "  按回车键继续" _
-          ;;
-      esac
     fi
   done
 }
@@ -1343,21 +1153,135 @@ show_status_info() {
   journalctl -u "${SERVICE_NAME}" --no-pager -n 3 2>/dev/null | sed 's/^/  /' || echo "  （无日志）"
 }
 
+_installation_wizard() {
+  local wizard_port="${ACTUAL_PORT}"
+  local wizard_auth_token="${CLI_AUTH_TOKEN}"
+  local wizard_proxy_token="${CLI_PROXY_TOKEN}"
+  local wizard_domain="${DOMAIN_NAME}"
+  local wizard_listen_port="${DOMAIN_LISTEN_PORT}"
+  local wizard_cert_email="${CERTBOT_EMAIL}"
+
+  if [ -f "${ENV_FILE}" ]; then
+    local env_port; env_port=$(grep '^PORT=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2)
+    [ -n "$env_port" ] && wizard_port="$env_port"
+    local env_auth; env_auth=$(grep '^AUTH_TOKEN=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2)
+    [ -n "$env_auth" ] && wizard_auth_token="$env_auth"
+    local env_proxy; env_proxy=$(grep '^PROXY_TOKEN=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2)
+    [ -n "$env_proxy" ] && wizard_proxy_token="$env_proxy"
+  fi
+
+  if [ -f "${MARKER_FILE}" ]; then
+    local mk_domain; mk_domain=$(grep '^domain=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2)
+    [ -n "$mk_domain" ] && wizard_domain="$mk_domain"
+    local mk_listen_port; mk_listen_port=$(grep '^listen_port=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2)
+    [ -n "$mk_listen_port" ] && wizard_listen_port="$mk_listen_port"
+    local mk_cert_email; mk_cert_email=$(grep '^cert_email=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2)
+    [ -n "$mk_cert_email" ] && wizard_cert_email="$mk_cert_email"
+  fi
+
+  echo ""
+  echo -e "${BOLD}${CYAN}╔════════════════════════════════════╗${NC}"
+  echo -e "${BOLD}${CYAN}║       安装部署向导                  ║${NC}"
+  echo -e "${BOLD}${CYAN}╚════════════════════════════════════╝${NC}"
+  echo ""
+  echo -e "  ${DIM}按步骤填入信息，中途可按 Ctrl+C 取消${NC}"
+  echo ""
+
+  echo -e "  ${YELLOW}管理令牌 = 管理后台登录密码${NC}"
+  prompt_read_silent "  第一步：请输入管理令牌: " wizard_auth_token
+  if [ -z "$wizard_auth_token" ]; then
+    echo -e "  ${RED}管理令牌不能为空，安装已取消${NC}"
+    prompt_read "  按回车键返回主菜单" _
+    return
+  fi
+  echo ""
+
+  echo -e "  ${YELLOW}代理令牌 = 下游 API 调用密钥${NC}"
+  prompt_read_silent "  第二步：请输入代理令牌: " wizard_proxy_token
+  if [ -z "$wizard_proxy_token" ]; then
+    echo -e "  ${RED}代理令牌不能为空，安装已取消${NC}"
+    prompt_read "  按回车键返回主菜单" _
+    return
+  fi
+  echo ""
+
+  prompt_read "  第三步：Metapi 内部端口 [${wizard_port}]: " input_port
+  if [ -n "$input_port" ]; then
+    if [[ "$input_port" =~ ^[0-9]+$ ]] && [ "$input_port" -ge 1 ] && [ "$input_port" -le 65535 ]; then
+      wizard_port="$input_port"
+    else
+      echo -e "  ${YELLOW}无效端口，使用默认值 ${wizard_port}${NC}"
+    fi
+  fi
+  echo ""
+
+  echo -e "  ${YELLOW}域名配置（可选，留空则跳过）${NC}"
+  prompt_read "  第四步：输入域名（如 api.example.com）: " input_domain
+  if [ -n "$input_domain" ]; then
+    wizard_domain="$input_domain"
+    local default_lp="443"
+    prompt_read "  外部访问端口 [${default_lp}]: " input_lp
+    wizard_listen_port="${input_lp:-$default_lp}"
+    echo ""
+    prompt_read "  证书邮箱（Let's Encrypt 通知，留空不申请证书）: " wizard_cert_email
+    echo ""
+    echo -e "  ${GREEN}✓ 域名配置完成:${NC}"
+    echo -e "    域名:  ${CYAN}${wizard_domain}:${wizard_listen_port}${NC}"
+    [ -n "$wizard_cert_email" ] && echo -e "    邮箱:  ${CYAN}${wizard_cert_email}${NC}" || echo -e "    证书:  ${YELLOW}未设置（部署后可在主菜单 10 配置）${NC}"
+  else
+    wizard_domain=""
+    wizard_listen_port=""
+    wizard_cert_email=""
+    echo -e "  ${DIM}跳过域名配置，仅 IP 访问${NC}"
+  fi
+  echo ""
+
+  separator
+  echo -e "  ${BOLD}安装摘要${NC}"
+  separator
+  echo -e "  Metapi 端口:  ${CYAN}${wizard_port}${NC}"
+  echo -e "  管理令牌:     ${CYAN}已设置${NC}"
+  echo -e "  代理令牌:     ${CYAN}已设置${NC}"
+  if [ -n "$wizard_domain" ]; then
+    echo -e "  域名:         ${CYAN}${wizard_domain}:${wizard_listen_port}${NC}"
+  else
+    echo -e "  域名:         ${DIM}未设置（仅 IP 访问）${NC}"
+  fi
+  echo ""
+
+  prompt_read "  确认开始安装？[Y/n]: " confirm_start
+  if [ "$confirm_start" = "n" ] || [ "$confirm_start" = "N" ]; then
+    echo -e "  ${YELLOW}已取消${NC}"
+    prompt_read "  按回车键返回主菜单" _
+    return
+  fi
+
+  ACTUAL_PORT="$wizard_port"
+  CLI_AUTH_TOKEN="$wizard_auth_token"
+  CLI_PROXY_TOKEN="$wizard_proxy_token"
+  DOMAIN_NAME="$wizard_domain"
+  DOMAIN_LISTEN_PORT="${wizard_listen_port:-${wizard_domain:+443}}"
+  CERTBOT_EMAIL="$wizard_cert_email"
+
+  SKIP_MENU=1
+  do_install
+}
+
 do_install() {
   COMPLETED_STEPS=()
   FAILED_STEPS=()
 
   if [ "$SKIP_MENU" -eq 0 ]; then
     show_interactive_menu
-  else
-    if [ -z "${CLI_AUTH_TOKEN}" ]; then
-      error "非交互模式必须通过 --token 指定管理令牌"
-      return 1
-    fi
-    if [ -z "${CLI_PROXY_TOKEN}" ]; then
-      error "非交互模式必须通过 --proxy-token 指定代理令牌"
-      return 1
-    fi
+  fi
+
+  if [ -z "${CLI_AUTH_TOKEN}" ]; then
+    error "非交互模式必须通过 --token 指定管理令牌"
+    return 1
+  fi
+  if [ -z "${CLI_PROXY_TOKEN}" ]; then
+    error "非交互模式必须通过 --proxy-token 指定代理令牌"
+    return 1
   fi
 
   echo ""
@@ -1448,74 +1372,80 @@ _setup_ssl_cert() {
 }
 
 _configure_ssl_domain_interactive() {
-  while true; do
-    echo ""
-    echo -e "${BOLD}${CYAN}  ── SSL / 域名配置 ──${NC}"
-    echo ""
-    echo -e "  ${GREEN}1)${NC} 设置域名:     ${BOLD}${DOMAIN_NAME:-${DIM}（未设置）${NC}}"
-    echo -e "  ${GREEN}2)${NC} 外部访问端口: ${BOLD}${DOMAIN_LISTEN_PORT:-$ACTUAL_PORT}${NC}"
-    echo -e "  ${GREEN}3)${NC} 证书邮箱:    ${BOLD}${CERTBOT_EMAIL:-${DIM}（未设置）${NC}}"
-    echo -e "  ${GREEN}4)${NC} 立即配置 Nginx + SSL"
-    echo -e "  ${GREEN}5)${NC} 移除 Nginx 配置（不影响 Metapi 服务）"
-    echo ""
-    echo -e "  ${CYAN}b)${NC} 返回主菜单"
-    echo ""
-    prompt_read "  请输入 [1-5, b]: " ssl_choice
-    echo ""
+  echo ""
+  echo -e "${BOLD}${CYAN}  ── SSL 域名配置向导 ──${NC}"
+  echo ""
 
-    case "$ssl_choice" in
-      1)
-        prompt_read "  输入域名（如 api.example.com，留空取消）: " new_d
-        if [ -n "$new_d" ]; then
-          DOMAIN_NAME="$new_d"
-          [ -z "$DOMAIN_LISTEN_PORT" ] && DOMAIN_LISTEN_PORT="443"
-        else
-          DOMAIN_NAME=""
-        fi
-        prompt_read "  按回车键继续" _
-        ;;
-      2)
-        prompt_read "  外部访问端口 [1-65535]: " new_lp
-        if [[ "$new_lp" =~ ^[0-9]+$ ]] && [ "$new_lp" -ge 1 ] && [ "$new_lp" -le 65535 ]; then
-          DOMAIN_LISTEN_PORT="$new_lp"
-        fi
-        prompt_read "  按回车键继续" _
-        ;;
-      3)
-        prompt_read "  输入邮箱（用于 Let's Encrypt 通知）: " new_e
-        CERTBOT_EMAIL="$new_e"
-        prompt_read "  按回车键继续" _
-        ;;
-      4)
-        info "配置 Nginx 反向代理..."
-        install_nginx
-        configure_nginx_proxy "${DOMAIN_NAME}" "${DOMAIN_LISTEN_PORT}" "${ACTUAL_PORT}"
-        if [ -n "$DOMAIN_NAME" ] && [ -n "$CERTBOT_EMAIL" ]; then
-          setup_ssl_cert "${DOMAIN_NAME}" "${CERTBOT_EMAIL}"
-        fi
-        write_marker
-        prompt_read "  按回车键返回" _
-        ;;
-      5)
-        remove_nginx_metapi_conf
-        if [ -n "$DOMAIN_NAME" ] && [ -d "${NGINX_SSL_DIR}/${DOMAIN_NAME}" ]; then
-          echo -e "  ${YELLOW}是否同时移除证书文件？${NC}"
-          echo -e "  ${YELLOW}移除后不可恢复。${NC}"
-          prompt_read "  确认移除？[y/N]: " rm_cert
-          if [ "$rm_cert" = "y" ] || [ "$rm_cert" = "Y" ]; then
-            rm -rf "${NGINX_SSL_DIR}/${DOMAIN_NAME}"
-            success "证书已移除"
-          fi
-        fi
-        prompt_read "  按回车键返回" _
-        ;;
-      b|B)
-        write_marker
-        return 0
-        ;;
-      *) echo -e "  ${RED}无效选择${NC}"; prompt_read "  按回车键继续" _ ;;
-    esac
-  done
+  local current_domain="${DOMAIN_NAME}"
+  local current_port="${DOMAIN_LISTEN_PORT}"
+  local current_email="${CERTBOT_EMAIL}"
+
+  if [ -n "$current_domain" ]; then
+    echo -e "  当前配置:  ${CYAN}${current_domain}:${current_port:-443}${NC}"
+    [ -n "$current_email" ] && echo -e "  当前邮箱:  ${CYAN}${current_email}${NC}"
+    echo ""
+    echo -e "  ${DIM}直接回车保留当前配置，输入新内容修改或清空。${NC}"
+    echo ""
+  fi
+
+  prompt_read "  域名（留空则移除域名和 SSL 配置）: " new_domain
+  if [ -z "$new_domain" ] && [ -n "$current_domain" ]; then
+    DOMAIN_NAME=""
+    DOMAIN_LISTEN_PORT=""
+    CERTBOT_EMAIL=""
+    remove_nginx_metapi_conf
+    echo -e "  ${YELLOW}域名配置已移除，Nginx 配置已清理${NC}"
+    prompt_read "  按回车键返回" _
+    return 0
+  fi
+
+  local set_domain="${new_domain:-$current_domain}"
+  [ -z "$set_domain" ] && { prompt_read "  按回车键返回" _; return 0; }
+
+  DOMAIN_NAME="$set_domain"
+
+  local default_port="${current_port:-443}"
+  prompt_read "  外部访问端口 (默认 ${default_port}): " new_port
+  DOMAIN_LISTEN_PORT="${new_port:-$default_port}"
+
+  prompt_read "  证书邮箱（用于 Let's Encrypt，留空不申请证书）: " new_email
+  [ -n "$new_email" ] && DOMAIN_LISTEN_PORT="${DOMAIN_LISTEN_PORT:-443}" && CERTBOT_EMAIL="$new_email" || CERTBOT_EMAIL=""
+
+  echo ""
+  echo -e "  ${BOLD}── 配置摘要 ──${NC}"
+  echo -e "  域名:  ${CYAN}${DOMAIN_NAME}${NC}"
+  echo -e "  端口:  ${CYAN}${DOMAIN_LISTEN_PORT}${NC}"
+  [ -n "$CERTBOT_EMAIL" ] && echo -e "  邮箱:  ${CYAN}${CERTBOT_EMAIL}${NC}" || echo -e "  证书:  ${YELLOW}未设置${NC}"
+  echo ""
+  prompt_read "  确认配置？[Y/n]: " confirm
+
+  if [ "$confirm" = "n" ] || [ "$confirm" = "N" ]; then
+    echo -e "  ${YELLOW}已取消${NC}"
+    prompt_read "  按回车键返回" _
+    return 0
+  fi
+
+  ACTUAL_PORT="$(grep '^PORT=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2 || echo "${DEFAULT_PORT}")"
+
+  info "安装/配置 Nginx..."
+  install_nginx
+  configure_nginx_proxy "${DOMAIN_NAME}" "${DOMAIN_LISTEN_PORT}" "${ACTUAL_PORT}"
+
+  if [ -n "$CERTBOT_EMAIL" ]; then
+    info "申请 SSL 证书..."
+    setup_ssl_cert "${DOMAIN_NAME}" "${CERTBOT_EMAIL}"
+  fi
+
+  write_marker
+
+  echo ""
+  if [ -d "${NGINX_SSL_DIR}/${DOMAIN_NAME}" ]; then
+    success "SSL 配置完成，访问: ${CYAN}https://${DOMAIN_NAME}${NC}"
+  else
+    success "Nginx 配置完成，访问: ${CYAN}http://${DOMAIN_NAME}:${DOMAIN_LISTEN_PORT}${NC}"
+  fi
+
+  prompt_read "  按回车键返回" _
 }
 
 do_repair() {
