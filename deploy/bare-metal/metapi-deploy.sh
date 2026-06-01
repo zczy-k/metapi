@@ -282,6 +282,34 @@ auto_resolve_port() {
   ACTUAL_PORT="$new_port"
 }
 
+check_port_conflict() {
+  local port="$1"
+  local conflicts=""
+
+  if port_in_use "$port"; then
+    conflicts="${conflicts}  [TCP] 端口 ${port} 已被其他进程占用"
+  fi
+
+  if detect_nginx; then
+    if nginx -T 2>/dev/null | grep -qP "^\s+listen\s+${port}\b"; then
+      conflicts="${conflicts}  [Nginx] 端口 ${port} 已在其他 Nginx 配置中使用"
+    fi
+  fi
+
+  if [ -n "$conflicts" ]; then
+    echo ""
+    echo -e "  ${RED}⚠ 端口 ${port} 存在冲突:${NC}"
+    echo "$conflicts" | while IFS= read -r line; do echo -e "  ${RED}${line}${NC}"; done
+    echo ""
+    echo -e "  ${YELLOW}建议更换为其他端口，或用以下命令排查:${NC}"
+    echo -e "    ${CYAN}ss -tlnp | grep ':${port} '${NC}"
+    echo -e "    ${CYAN}nginx -T 2>&1 | grep -B5 'listen.*${port}'${NC}"
+    echo ""
+    return 1
+  fi
+  return 0
+}
+
 detect_nginx() {
   command -v nginx &>/dev/null && nginx -v 2>&1 | grep -q nginx
 }
@@ -324,6 +352,10 @@ configure_nginx_proxy() {
   local domain="$1" listen_port="$2" upstream_port="$3"
 
   info "写入 Nginx 反向代理配置..."
+
+  if detect_nginx && nginx -T 2>/dev/null | grep -qP "^\s+listen\s+${listen_port}\b"; then
+    warn "端口 ${listen_port} 已在其他 Nginx 配置中使用（仅提醒，继续写入）"
+  fi
 
   {
     echo "server {"
@@ -1288,9 +1320,18 @@ _installation_wizard() {
   prompt_read "  第四步：输入域名（如 api.example.com）: " input_domain
   if [ -n "$input_domain" ]; then
     wizard_domain="$input_domain"
-    local default_lp="443"
-    prompt_read "  外部访问端口 [${default_lp}]: " input_lp
-    wizard_listen_port="${input_lp:-$default_lp}"
+    while true; do
+      local default_lp="443"
+      prompt_read "  外部访问端口 [${default_lp}]: " input_lp
+      wizard_listen_port="${input_lp:-$default_lp}"
+      if check_port_conflict "$wizard_listen_port"; then
+        break
+      fi
+      prompt_read "  是否重新输入端口？[Y/n]: " retry_port
+      if [ "$retry_port" = "n" ] || [ "$retry_port" = "N" ]; then
+        break
+      fi
+    done
     echo ""
     prompt_read "  证书邮箱（Let's Encrypt 通知，留空不申请证书）: " wizard_cert_email
     echo ""
@@ -1476,8 +1517,17 @@ _configure_ssl_domain_interactive() {
   DOMAIN_NAME="$set_domain"
 
   local default_port="${current_port:-443}"
-  prompt_read "  外部访问端口 (默认 ${default_port}): " new_port
-  DOMAIN_LISTEN_PORT="${new_port:-$default_port}"
+  while true; do
+    prompt_read "  外部访问端口 (默认 ${default_port}): " new_port
+    DOMAIN_LISTEN_PORT="${new_port:-$default_port}"
+    if check_port_conflict "$DOMAIN_LISTEN_PORT"; then
+      break
+    fi
+    prompt_read "  是否重新输入端口？[Y/n]: " retry_port
+    if [ "$retry_port" = "n" ] || [ "$retry_port" = "N" ]; then
+      break
+    fi
+  done
 
   prompt_read "  证书邮箱（用于 Let's Encrypt，留空不申请证书）: " new_email
   [ -n "$new_email" ] && DOMAIN_LISTEN_PORT="${DOMAIN_LISTEN_PORT:-443}" && CERTBOT_EMAIL="$new_email" || CERTBOT_EMAIL=""
