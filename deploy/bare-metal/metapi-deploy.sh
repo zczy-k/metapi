@@ -1321,8 +1321,11 @@ do_install() {
 
   local ip_addr; ip_addr=$(hostname -I 2>/dev/null | awk '{print $1}' || echo '服务器IP')
   if [ -n "$DOMAIN_NAME" ]; then
-    echo -e "  访问地址:  ${CYAN}http://${DOMAIN_NAME}:${DOMAIN_LISTEN_PORT}${NC}"
-    echo -e "  （SSL 证书设置后可用 HTTPS: ${CYAN}https://${DOMAIN_NAME}${NC}）"
+    if [ -n "$CERTBOT_EMAIL" ]; then
+      echo -e "  访问地址:  ${CYAN}https://${DOMAIN_NAME}${NC}"
+    else
+      echo -e "  访问地址:  ${CYAN}http://${DOMAIN_NAME}:${DOMAIN_LISTEN_PORT}${NC}"
+    fi
   fi
   echo -e "  IP 直连:   ${CYAN}http://${ip_addr}:${DOMAIN_LISTEN_PORT:-$ACTUAL_PORT}${NC}"
   echo -e "  管理令牌:  .env 中的 AUTH_TOKEN"
@@ -1352,7 +1355,11 @@ _install_service_and_perms() {
 
 _setup_nginx_proxy() {
   install_nginx || return 1
-  configure_nginx_proxy "${DOMAIN_NAME}" "${DOMAIN_LISTEN_PORT}" "${ACTUAL_PORT}"
+  if [ -n "$CERTBOT_EMAIL" ]; then
+    configure_nginx_proxy "${DOMAIN_NAME}" "80" "${ACTUAL_PORT}"
+  else
+    configure_nginx_proxy "${DOMAIN_NAME}" "${DOMAIN_LISTEN_PORT}" "${ACTUAL_PORT}"
+  fi
 }
 
 _setup_ssl_cert() {
@@ -1417,7 +1424,11 @@ _configure_ssl_domain_interactive() {
 
   info "安装/配置 Nginx..."
   install_nginx
-  configure_nginx_proxy "${DOMAIN_NAME}" "${DOMAIN_LISTEN_PORT}" "${ACTUAL_PORT}"
+  if [ -n "$CERTBOT_EMAIL" ]; then
+    configure_nginx_proxy "${DOMAIN_NAME}" "80" "${ACTUAL_PORT}"
+  else
+    configure_nginx_proxy "${DOMAIN_NAME}" "${DOMAIN_LISTEN_PORT}" "${ACTUAL_PORT}"
+  fi
 
   if [ -n "$CERTBOT_EMAIL" ]; then
     info "申请 SSL 证书..."
