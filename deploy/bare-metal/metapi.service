@@ -1,0 +1,46 @@
+[Unit]
+Description=Metapi - AI API Aggregation Gateway
+Documentation=https://metapi.cita777.me
+After=network.target
+
+[Service]
+Type=simple
+# ─── 修改以下配置 ──────────────────────────────────────
+User=metapi
+Group=metapi
+WorkingDirectory=/opt/metapi
+# ─────────────────────────────────────────────────────────
+
+Environment=NODE_ENV=production
+Environment=DATA_DIR=/opt/metapi/data
+# 限制 Node.js 堆内存，2核1G 服务器建议 192-256
+Environment=NODE_OPTIONS=--max-old-space-size=256
+
+# 从 .env 文件加载的关键变量（请根据实际情况修改）
+Environment=AUTH_TOKEN=change-me-admin-token
+Environment=PROXY_TOKEN=change-me-proxy-sk-token
+Environment=PORT=4000
+Environment=TZ=Asia/Shanghai
+
+# 启动前先执行数据库迁移
+ExecStartPre=/usr/bin/node dist/server/db/migrate.js
+ExecStart=/usr/bin/node dist/server/index.js
+
+# 异常自动重启
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=3
+StartLimitIntervalSec=60
+
+# 日志
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=metapi
+
+# 安全限制
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/metapi/data
+
+[Install]
+WantedBy=multi-user.target

@@ -335,6 +335,62 @@ docker run -d --name metapi \
 
 </details>
 
+### 裸机轻量部署（低配置服务器推荐）
+
+适用于 **2核1G 及以下** 低配置服务器，相比 Docker 部署省去容器运行时开销（约 50-100MB 内存），预估内存占用仅 ~115-220MB。
+
+**一键安装：**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zczy-k/metapi/main/deploy/bare-metal/install.sh | bash -s --
+```
+
+**手动安装：**
+
+```bash
+# 1. 安装 Node.js 22+ 和编译依赖
+# 2. 克隆并构建
+git clone https://github.com/zczy-k/metapi.git /opt/metapi
+cd /opt/metapi
+npm ci --ignore-scripts && npm rebuild esbuild sharp better-sqlite3
+npm run build:web && npm run build:server
+npm prune --omit=dev
+
+# 3. 配置环境变量
+cp deploy/bare-metal/.env.example .env
+# 编辑 .env，设置 AUTH_TOKEN、PROXY_TOKEN 和 NODE_OPTIONS=--max-old-space-size=256
+
+# 4. 启动
+node dist/server/db/migrate.js
+NODE_OPTIONS=--max-old-space-size=256 node dist/server/index.js
+```
+
+> [!TIP]
+> 1G 内存服务器建议：配置 1GB swap、设置 `NODE_OPTIONS=--max-old-space-size=256`、使用 PM2 管理进程自动重启。
+> 详见 [裸机部署文档](deploy/bare-metal/README.md)。
+
+<details>
+<summary><strong>Alpine 精简版 Docker 镜像</strong></summary>
+
+适用于仍希望使用 Docker 但需要更小镜像的场景（移除了 kubectl/helm，基于 Alpine）：
+
+```bash
+# 构建
+docker build -f docker/Dockerfile.alpine -t metapi:alpine .
+
+# 运行
+docker run -d --name metapi \
+  -p 4000:4000 \
+  -e AUTH_TOKEN=your-admin-token \
+  -e PROXY_TOKEN=your-proxy-sk-token \
+  -e TZ=Asia/Shanghai \
+  -v ./data:/app/data \
+  --restart unless-stopped \
+  metapi:alpine
+```
+
+</details>
+
 启动后访问 `http://localhost:4000`，用 `AUTH_TOKEN` 登录即可。
 
 > [!NOTE]
@@ -351,7 +407,7 @@ docker run -d --name metapi \
 > 桌面安装包首次启动也属于这类场景：如果你没有额外注入 `AUTH_TOKEN`，默认管理员令牌同样是 `change-me-admin-token`。
 > 如果在「设置」面板中修改了管理员令牌，后续登录请使用新令牌。
 
-Docker Compose、桌面安装包、反向代理、升级与数据库选项等详见 [部署指南](https://metapi.cita777.me/deployment)。
+Docker Compose、裸机部署、桌面安装包、反向代理、升级与数据库选项等详见 [部署指南](https://metapi.cita777.me/deployment)。
 
 📖 **[环境变量与配置](https://metapi.cita777.me/configuration)** · **[客户端接入指南](https://metapi.cita777.me/client-integration)** · **[常见问题](https://metapi.cita777.me/faq)**
 

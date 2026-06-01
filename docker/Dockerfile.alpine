@@ -1,0 +1,69 @@
+# ──────────────────────────────────────────────────────
+# Metapi Alpine 精简版 Docker 镜像
+# 适用于低配置服务器（2核1G）
+#
+# 相比标准镜像的优化:
+#   - 基于 Alpine Linux（~5MB 基础镜像 vs Debian slim ~80MB）
+#   - 移除 kubectl / helm（节省 ~100MB 镜像空间 + 运行时内存）
+#   - 多阶段构建，最终镜像仅含运行时依赖
+#
+# 构建:
+#   docker build -f docker/Dockerfile.alpine -t metapi:alpine .
+#
+# 运行:
+#   docker run -d --name metapi \
+#     -p 4000:4000 \
+#     -e AUTH_TOKEN=your-token \
+#     -e PROXY_TOKEN=your-proxy-token \
+#     -e TZ=Asia/Shanghai \
+#     -v ./data:/app/data \
+#     --restart unless-stopped \
+#     metapi:alpine
+# ──────────────────────────────────────────────────────
+
+# ─── 第一阶段: 构建 ───────────────────────────────────
+FROM node:22-alpine AS builder
+
+WORKDIR /app
+
+# Alpine 编译原生模块所需
+RUN apk add --no-cache python3 make g++
+
+COPY package.json package-lock.json ./
+RUN npm ci --ignore-scripts --no-audit --no-fund
+RUN npm rebuild esbuild sharp better-sqlite3 --no-audit --no-fund
+
+COPY . .
+RUN npm run build:web && npm run build:server
+RUN npm prune --omit=dev --no-audit --no-fund
+
+# ─── 第二阶段: 运行 ───────────────────────────────────
+FROM node:22-alpine
+
+WORKDIR /app
+
+# 仅安装运行时必需的系统库
+RUN apk add --no-cache ca-certificates curl tzdata
+
+# 复制构建产物
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package.json ./
+COPY --from=builder /app/drizzle ./drizzle
+
+# 创建数据目录和非 root 用户
+RUN mkdir -p /app/data && \
+    addgroup -S metapi && \
+    adduser -S metapi -G metapi && \
+    chown -R metapi:metapi /app
+
+USER metapi
+
+EXPOSE 4000
+
+ENV NODE_ENV=production
+ENV DATA_DIR=/app/data
+# 限制 Node.js 堆内存，适配 1G 服务器
+ENV NODE_OPTIONS=--max-old-space-size=256
+
+CMD ["sh", "-c", "node dist/server/db/migrate.js && node dist/server/index.js"]
