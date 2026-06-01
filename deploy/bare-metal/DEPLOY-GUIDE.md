@@ -7,12 +7,11 @@
 
 ## 目录
 
+- [一键部署](#一键部署)
 - [架构说明](#架构说明)
 - [部署方式对比](#部署方式对比)
-- [方式一：交互式脚本部署（推荐）](#方式一交互式脚本部署推荐)
-- [方式二：手动部署（预编译下载）](#方式二手动部署预编译下载)
-- [方式三：手动部署（源码编译）](#方式三手动部署源码编译)
-- [方式四：Alpine 精简版 Docker](#方式四alpine-精简版-docker)
+- [命令行参数](#命令行参数)
+- [非交互式部署](#非交互式部署)
 - [CI/CD 预编译发布](#cicd-预编译发布)
 - [更新与升级](#更新与升级)
 - [自动更新配置](#自动更新配置)
@@ -23,33 +22,73 @@
 
 ---
 
-## 架构说明
+## 一键部署
 
-### 编译在哪里发生？
+### 最简方式（推荐）
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zczy-k/metapi/main/deploy/bare-metal/metapi-deploy.sh | sudo bash -s --
+```
+
+脚本会**全自动完成**：
+
+1. ✅ 检测系统平台（amd64 / arm64）
+2. ✅ 检测网络连通性
+3. ✅ 安装 Node.js 22 运行时
+4. ✅ 从 GitHub Release 下载对应架构的预编译包
+5. ✅ 创建隔离用户、配置 Swap（低内存自动）
+6. ✅ 提示输入 `AUTH_TOKEN` 和 `PROXY_TOKEN`（唯一需要手动输入的步骤）
+7. ✅ 安装 systemd 服务并启动
+8. ✅ 如果预编译包不可用，自动切换到源码编译模式
+
+**整个过程用户只需输入两个令牌，其他全部自动。**
+
+### 非交互式部署
+
+```bash
+# 指定令牌，完全无需交互
+curl -fsSL https://raw.githubusercontent.com/zczy-k/metapi/main/deploy/bare-metal/metapi-deploy.sh | \
+  sudo bash -s -- --token YOUR_ADMIN_TOKEN --proxy-token YOUR_PROXY_TOKEN
+```
+
+### 先下载再部署
+
+```bash
+# 如果 curl 管道方式不便使用
+wget https://raw.githubusercontent.com/zczy-k/metapi/main/deploy/bare-metal/metapi-deploy.sh
+sudo bash metapi-deploy.sh
+```
+
+---
+
+## 架构说明
 
 ```
 ┌─────────────────────────────────────────────────────────┐
 │  GitHub Actions CI/CD（编译发生在云端）                    │
 │                                                         │
-│  git push → npm ci → npm build → 打包 tar.gz            │
-│                           ↓                             │
-│                    GitHub Release                        │
+│  git tag v* → npm ci → npm build → 打包 tar.gz          │
+│                                    ↓                    │
+│                             GitHub Release               │
 └─────────────────────────────┬───────────────────────────┘
                               │ 下载预编译包
                               ↓
 ┌─────────────────────────────────────────────────────────┐
 │  你的服务器（2核1G）                                      │
 │                                                         │
-│  下载 tar.gz → 解压 → 启动（无需编译！）                   │
+│  metapi-deploy.sh 自动:                                  │
+│    1. 检测架构 (amd64/arm64)                              │
+│    2. 下载对应的 tar.gz                                   │
+│    3. 解压 → 安装 Node.js → 配置 → 启动                  │
 │                                                         │
 │  资源需求: 仅需 Node.js 运行时，不需要 python3/make/g++    │
 │  磁盘占用: ~300MB（vs 源码编译 ~500MB）                   │
 └─────────────────────────────────────────────────────────┘
 ```
 
-**预编译下载模式（推荐）**：编译在 GitHub 上完成，服务器只下载和运行，对服务器配置要求最低。
+**预编译下载模式（默认）**：编译在 GitHub 上完成，服务器只下载和运行。
 
-**源码编译模式（备选）**：服务器上 `git clone` + `npm build`，需要更多内存和时间。
+**源码编译模式（自动回退）**：当预编译包不可用时自动切换，在服务器上编译。
 
 ---
 
@@ -57,144 +96,51 @@
 
 | 部署方式 | 预估内存 | 磁盘占用 | 编译位置 | 适用场景 |
 |---------|---------|---------|---------|---------|
-| **预编译下载（推荐）** | **~115-180MB** | **~300MB** | **GitHub CI** | **2核1G 低配服务器** |
-| 源码编译 | ~200-300MB | ~500MB | 服务器本地 | 需要自定义修改 |
+| **预编译下载（默认）** | **~115-180MB** | **~300MB** | **GitHub CI** | **2核1G 低配服务器** |
+| 源码编译（自动回退） | ~200-300MB | ~500MB | 服务器本地 | 预编译包不可用时 |
 | Docker Compose（官方） | ~200-350MB | ~800MB | Docker 内 | 有 Docker 环境 |
 | Docker Alpine Lite | ~150-280MB | ~300MB | Docker 内 | 需要 Docker 但想省资源 |
 
 ---
 
-## 方式一：交互式脚本部署（推荐）
-
-### 一键安装
+## 命令行参数
 
 ```bash
-# 方式 A：从 GitHub Release 下载预编译包（最低资源需求）
-# 先在 GitHub Releases 页面下载最新包
-curl -fsSLO https://github.com/zczy-k/metapi/releases/latest/download/metapi-XXX-linux-amd64.tar.gz
-tar -xzf metapi-*.tar.gz
-cd metapi-*/
-sudo bash deploy/bare-metal/metapi-deploy.sh
-
-# 方式 B：克隆仓库（包含部署脚本）
-git clone https://github.com/zczy-k/metapi.git /tmp/metapi
-cd /tmp/metapi
-sudo bash deploy/bare-metal/metapi-deploy.sh
+sudo bash metapi-deploy.sh [选项]
 ```
 
-### 脚本菜单
-
-```
-  1) 新装       — 选择「预编译下载」或「源码编译」模式
-  2) 依赖修复   — 诊断并修复环境问题
-  3) 卸载
-     ├── 保留数据   — 删除程序，保留数据库和配置
-     └── 完整卸载   — 删除一切（需二次确认）
-  4) 退出
-```
-
-### 两种安装模式
-
-| 模式 | 服务器要求 | 安装时间 | 说明 |
-|------|----------|---------|------|
-| **预编译下载** | Node.js 运行时 + 300MB 磁盘 | ~2 分钟 | 从 GitHub Release 下载已编译好的包 |
-| 源码编译 | Node.js + python3/make/g++ + 500MB 磁盘 + 1G+ 内存 | ~10-20 分钟 | 在服务器上克隆并编译 |
-
-预编译下载模式会自动检测系统架构（amd64/arm64），从 GitHub Release 下载对应的预编译包。
+| 选项 | 说明 |
+|------|------|
+| （无） | 一键部署（自动检测平台，下载预编译包） |
+| `--source` | 强制源码编译模式 |
+| `--uninstall` | 卸载（保留数据） |
+| `--uninstall-all` | 完整卸载（不保留数据） |
+| `--repair` | 依赖修复 |
+| `--token TOKEN` | 非交互式指定 AUTH_TOKEN |
+| `--proxy-token PT` | 非交互式指定 PROXY_TOKEN |
+| `--yes`, `-y` | 非交互式确认 |
+| `--help`, `-h` | 显示帮助 |
 
 ---
 
-## 方式二：手动部署（预编译下载）
+## 非交互式部署
 
-适用于不想用交互脚本、只需要最简单的步骤：
-
-```bash
-# 1. 下载预编译包（替换版本号和架构）
-VERSION=1.3.0  # 查看 https://github.com/zczy-k/metapi/releases/latest
-ARCH=amd64     # amd64 或 arm64
-curl -fsSLO "https://github.com/zczy-k/metapi/releases/download/v${VERSION}/metapi-${VERSION}-linux-${ARCH}.tar.gz"
-
-# 2. 解压到安装目录
-tar -xzf metapi-${VERSION}-linux-${ARCH}.tar.gz
-sudo mv metapi-${VERSION}-linux-${ARCH} /opt/metapi
-
-# 3. 安装 Node.js 运行时（如果还没有）
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-sudo apt-get install -y nodejs
-
-# 4. 配置环境变量
-cd /opt/metapi
-cp deploy/bare-metal/.env.example .env
-# 编辑 .env，设置 AUTH_TOKEN 和 PROXY_TOKEN
-sudo vim .env
-
-# 5. 创建用户并启动
-sudo useradd -r -s /bin/false metapi
-sudo chown -R metapi:metapi /opt/metapi
-sudo -u metapi node dist/server/db/migrate.js
-sudo -u metapi node dist/server/index.js
-```
-
----
-
-## 方式三：手动部署（源码编译）
-
-### 1. 安装 Node.js 22+
+适合自动化工具（Ansible、Terraform 等）或批量部署：
 
 ```bash
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-sudo apt-get install -y nodejs
-```
+# 完全非交互
+sudo bash metapi-deploy.sh --token my-admin-token --proxy-token my-proxy-token
 
-### 2. 安装编译依赖
-
-```bash
-sudo apt-get install -y python3 make g++ git curl
-```
-
-### 3. 克隆并构建
-
-```bash
-git clone https://github.com/zczy-k/metapi.git /opt/metapi
-cd /opt/metapi
-
-npm ci --ignore-scripts --no-audit --no-fund
-npm rebuild esbuild sharp better-sqlite3 --no-audit --no-fund
-npm run build:web
-npm run build:server
-npm prune --omit=dev --no-audit --no-fund
-```
-
-### 4. 配置环境变量
-
-```bash
-cp deploy/bare-metal/.env.example .env
-vim .env  # 修改 AUTH_TOKEN 和 PROXY_TOKEN
-```
-
-### 5. 启动（同方式二步骤 5）
-
----
-
-## 方式四：Alpine 精简版 Docker
-
-```bash
-docker build -f docker/Dockerfile.alpine -t metapi:alpine .
-docker run -d --name metapi \
-  -p 4000:4000 \
-  -e AUTH_TOKEN=your-admin-token \
-  -e PROXY_TOKEN=your-proxy-sk-token \
-  -e TZ=Asia/Shanghai \
-  -v ./data:/app/data \
-  --restart unless-stopped \
-  metapi:alpine
+# 从远程一键部署
+curl -fsSL https://raw.githubusercontent.com/zczy-k/metapi/main/deploy/bare-metal/metapi-deploy.sh | \
+  sudo bash -s -- --token my-admin-token --proxy-token my-proxy-token
 ```
 
 ---
 
 ## CI/CD 预编译发布
 
-项目已配置 GitHub Actions 自动构建（`.github/workflows/build-release.yml`）：
+项目已配置 GitHub Actions 自动构建（`.github/workflows/build-release.yml`）。
 
 ### 触发方式
 
@@ -206,15 +152,18 @@ docker run -d --name metapi \
 ### 构建产物
 
 每次发布会生成：
-- `metapi-{version}-linux-amd64.tar.gz` — x86_64 服务器
-- `metapi-{version}-linux-arm64.tar.gz` — ARM64 服务器
+
+| 文件 | 架构 | 适用服务器 |
+|------|------|-----------|
+| `metapi-{version}-linux-amd64.tar.gz` | x86_64 | 普通 VPS / 云服务器 |
+| `metapi-{version}-linux-arm64.tar.gz` | ARM64 | 树莓派5 / ARM 云服务器 |
 
 ### 在自己的 Fork 上启用
 
 1. Fork `zczy-k/metapi` 到你的 GitHub 账号
 2. 在 Fork 仓库的 Settings → Actions → General 中启用 Actions
-3. 推送 tag 或手动触发 workflow 即可
-4. 修改 `.env` 中的 `UPDATE_CHECK_URL` 指向你的 Fork：
+3. 推送 tag 或手动触发 workflow
+4. 修改 `.env` 中的 `UPDATE_CHECK_URL`：
 
 ```bash
 UPDATE_CHECK_URL=https://api.github.com/repos/YOUR_USERNAME/metapi/releases/latest
@@ -238,46 +187,30 @@ sudo bash /opt/metapi/deploy/bare-metal/metapi-updater.sh
 - **预编译安装** → 从 GitHub Release 下载新版本
 - **源码安装** → git pull + 重新构建
 
-### 手动更新（预编译模式）
+### 手动更新
 
 ```bash
-# 1. 下载新版本
-curl -fsSLO https://github.com/zczy-k/metapi/releases/download/vX.Y.Z/metapi-X.Y.Z-linux-amd64.tar.gz
+# 1. 下载新版本预编译包
+ARCH=$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/')
+curl -fsSLO "https://github.com/zczy-k/metapi/releases/latest/download/metapi-latest-linux-${ARCH}.tar.gz"
 
-# 2. 停止服务
+# 2. 停止并备份
 sudo systemctl stop metapi
-
-# 3. 备份 .env 和 data/
 cp /opt/metapi/.env /tmp/metapi-env-backup
 cp -a /opt/metapi/data /tmp/metapi-data-backup
 
-# 4. 解压覆盖
+# 3. 解压覆盖
 tar -xzf metapi-*.tar.gz
-rm -rf /opt/metapi/* /opt/metapi/.[!.]* 2>/dev/null
-cp -a metapi-*/. /opt/metapi/
+sudo rm -rf /opt/metapi/* /opt/metapi/.[!.]* 2>/dev/null
+sudo cp -a metapi-*/. /opt/metapi/
 
-# 5. 恢复配置和数据
+# 4. 恢复
 cp /tmp/metapi-env-backup /opt/metapi/.env
 cp -a /tmp/metapi-data-backup/. /opt/metapi/data/
+sudo chown -R metapi:metapi /opt/metapi
 
-# 6. 重启
+# 5. 重启
 sudo systemctl start metapi
-```
-
-### 手动更新（源码模式）
-
-```bash
-cd /opt/metapi
-git stash
-git pull origin main
-git stash pop
-
-npm ci --ignore-scripts --no-audit --no-fund
-npm rebuild esbuild sharp better-sqlite3 --no-audit --no-fund
-npm run build:web && npm run build:server
-npm prune --omit=dev --no-audit --no-fund
-
-sudo systemctl restart metapi
 ```
 
 ---
@@ -287,23 +220,12 @@ sudo systemctl restart metapi
 ### 方案 A：systemd timer（推荐）
 
 ```bash
-# 安装 timer
 sudo cp /opt/metapi/deploy/bare-metal/metapi-update.{service,timer} /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now metapi-update.timer
 
 # 查看状态
 systemctl list-timers metapi-update.timer
-```
-
-**自定义检查频率：**
-
-```bash
-# 修改为每 6 小时
-sudo systemctl edit metapi-update.timer
-# 添加:
-# [Timer]
-# OnCalendar=*-*-* 00/6:00:00
 ```
 
 ### 方案 B：cron
@@ -359,8 +281,11 @@ systemctl restart metapi         # 重启
 systemctl stop metapi            # 停止
 
 # 更新
-bash /opt/metapi/deploy/bare-metal/metapi-updater.sh --check  # 检查
-bash /opt/metapi/deploy/bare-metal/metapi-updater.sh           # 更新
+sudo bash /opt/metapi/deploy/bare-metal/metapi-updater.sh --check  # 检查
+sudo bash /opt/metapi/deploy/bare-metal/metapi-updater.sh           # 更新
+
+# 卸载（保留数据）
+sudo bash /opt/metapi/deploy/bare-metal/metapi-deploy.sh --uninstall
 
 # 数据库备份
 cp -a /opt/metapi/data /backup/metapi-data-$(date +%Y%m%d)
@@ -396,9 +321,10 @@ server {
 
 | 问题 | 解决方案 |
 |------|---------|
-| 预编译包无对应架构 | 使用源码编译模式，或在 Fork 上配置 CI/CD 构建你的架构 |
-| `better-sqlite3` 加载失败 | 架构不匹配，确认下载了正确的预编译包（amd64/arm64） |
-| 内存不足 | 增加 swap，降低 `--max-old-space-size` 值 |
-| 端口被占用 | 修改 `.env` 中的 `PORT` 值 |
-| GitHub Release 未找到 | 项目可能尚未发布预编译包，使用源码编译模式 |
-| 更新后服务无法启动 | `journalctl -u metapi -n 50` 查看日志，或执行依赖修复 |
+| 预编译包无对应架构 | 脚本会自动切换到源码编译模式 |
+| `better-sqlite3` 加载失败 | 架构不匹配，运行 `sudo bash metapi-deploy.sh --repair` |
+| 内存不足 | 脚本会自动配置 Swap，也可手动增加 |
+| 端口被占用 | 脚本会自动选择下一个可用端口 |
+| GitHub Release 未找到 | 脚本会自动切换到源码编译，或使用 `--source` 参数 |
+| 更新后服务无法启动 | `journalctl -u metapi -n 50` 查看日志，或 `sudo bash metapi-deploy.sh --repair` |
+| Node.js 安装失败 | 检查网络或手动安装 Node.js 22+ |
