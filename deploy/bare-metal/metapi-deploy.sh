@@ -270,17 +270,23 @@ check_network() {
 # ═══════════════════════════════════════════════════════════
 get_latest_release() {
   local api_url="${1:-${RELEASE_API}}"
-  curl -sf --connect-timeout 15 --max-time 15 \
+  curl -sL --connect-timeout 15 --max-time 15 \
     -H "Accept: application/vnd.github+json" "$api_url" 2>/dev/null
 }
 
+get_latest_release_via_web() {
+  curl -sL --connect-timeout 15 --max-time 15 \
+    -H "Accept: application/json" \
+    "https://github.com/zczy-k/metapi/releases/latest" 2>/dev/null
+}
+
 get_release_version() {
-  echo "$1" | grep -oP '"tag_name"\s*:\s*"\K[^"]+' | head -1
+  echo "$1" | grep -oP '"tag_name"\s*:\s*"\K[^"]+' 2>/dev/null | head -1
 }
 
 get_release_asset_url() {
   local release_info="$1" target_arch="$2"
-  echo "$release_info" | grep -oP '"browser_download_url"\s*:\s*"\K[^"]+' | grep "linux-${target_arch}"
+  echo "$release_info" | grep -oP '"browser_download_url"\s*:\s*"\K[^"]+' 2>/dev/null | grep "linux-${target_arch}" | head -1
 }
 
 # ═══════════════════════════════════════════════════════════
@@ -385,11 +391,17 @@ download_prebuilt() {
   release_info=$(get_latest_release)
 
   if [ -z "$release_info" ]; then
+    warn "GitHub API 返回为空，尝试备用方式..."
+    release_info=$(get_latest_release_via_web)
+  fi
+
+  if [ -z "$release_info" ]; then
     error "无法获取 GitHub Release 信息"
     echo ""
     echo -e "  ${YELLOW}可能的原因:${NC}"
     echo -e "    - 项目尚未发布预编译包"
     echo -e "    - 网络无法访问 GitHub API"
+    echo -e "    - 国内服务器可能被限制（建议配置代理或使用镜像）"
     echo ""
     echo -e "  ${CYAN}将自动切换到源码编译模式${NC}"
     echo ""
@@ -398,6 +410,11 @@ download_prebuilt() {
   fi
 
   local version; version=$(get_release_version "$release_info")
+  if [ -z "$version" ]; then
+    warn "无法解析版本号，将切换到源码编译模式"
+    INSTALL_MODE="source"
+    return 0
+  fi
   info "最新版本: ${version}"
 
   local download_url
@@ -405,6 +422,10 @@ download_prebuilt() {
 
   if [ -z "$download_url" ]; then
     warn "未找到 ${arch} 架构的预编译包，将切换到源码编译模式"
+    echo -e "  ${YELLOW}已发布的资产:${NC}"
+    echo "$release_info" | grep -oP '"browser_download_url"\s*:\s*"\K[^"]+' 2>/dev/null | while read -r url; do
+      echo -e "    ${DIM}${url}${NC}"
+    done
     INSTALL_MODE="source"
     return 0
   fi
@@ -415,9 +436,9 @@ download_prebuilt() {
   local filename; filename=$(basename "$download_url")
   local tmp_file="${tmp_dir}/${filename}"
 
-  info "下载预编译包 (可能需要几分钟)..."
+  info "下载预编译包 (约 $(echo "$filename" | grep -oP '[0-9]+MB' || echo '45MB'))..."
   if ! curl -fSL --connect-timeout 30 --max-time 600 --progress-bar -o "$tmp_file" "$download_url" 2>&1; then
-    error "下载失败"
+    error "下载失败，请检查网络"
     rm -rf "${tmp_dir}"
     return 1
   fi
