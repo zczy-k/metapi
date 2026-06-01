@@ -693,7 +693,7 @@ show_firewall_hint() {
 }
 
 # ═══════════════════════════════════════════════════════════
-# 交互式菜单
+# 交互式主菜单
 # ═══════════════════════════════════════════════════════════
 show_interactive_menu() {
   local arch; arch=$(detect_arch)
@@ -701,120 +701,278 @@ show_interactive_menu() {
   local mem_mb; mem_mb=$(get_memory_mb)
   local disk_mb; disk_mb=$(get_disk_mb)
 
-  # 菜单内可编辑的变量
+  # 安装配置变量
   local menu_install_mode="${INSTALL_MODE}"
   local menu_port="${ACTUAL_PORT}"
   local menu_auth_token="${CLI_AUTH_TOKEN}"
   local menu_proxy_token="${CLI_PROXY_TOKEN}"
 
-  # 清屏一次建立干净起点，后续循环原地重绘
+  # 检测是否已安装
+  local is_installed="no"
+  [ -f "${MARKER_FILE}" ] && is_installed="yes"
+
+  # 服务状态
+  local svc_status="未安装"
+  if [ "$is_installed" = "yes" ]; then
+    if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+      svc_status="运行中"
+    elif systemctl is-enabled --quiet "${SERVICE_NAME}" 2>/dev/null; then
+      svc_status="已停止"
+    else
+      svc_status="异常"
+    fi
+  fi
+
+  # 当前菜单页：main / install
+  local menu_page="main"
+
   clear
 
   while true; do
-    # 隐藏光标 → 移到顶部重绘 → 用户看不到光标跳动
+    # 隐藏光标 → 移到顶部重绘
     printf '\033[?25l\033[H'
 
     echo ""
     echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}${CYAN}║          ${BOLD}${GREEN}Metapi 一键部署${NC}${BOLD}${CYAN}                        ║${NC}"
+    echo -e "${BOLD}${CYAN}║          ${BOLD}${GREEN}Metapi 管理面板${NC}${BOLD}${CYAN}                        ║${NC}"
     echo -e "${BOLD}${CYAN}╚══════════════════════════════════════════════╝${NC}"
     echo -e "  ${DIM}${os} / ${arch}  内存 ${mem_mb}MB  磁盘 ${disk_mb}MB 可用${NC}"
+    echo -e "  ${DIM}服务状态: $( [ "$svc_status" = "运行中" ] && echo "${GREEN}${svc_status}${NC}" || [ "$svc_status" = "已停止" ] && echo "${YELLOW}${svc_status}${NC}" || echo "${RED}${svc_status}${NC}" )${NC}"
     echo ""
-    echo -e "  ${CYAN}──────────────────────────────────${NC}"
-    echo -e "  ${GREEN}[1]${NC} 安装模式    $( [ "$menu_install_mode" = "prebuilt" ] && echo "${GREEN}预编译下载（推荐）${NC}" || echo "${YELLOW}源码编译${NC}" )"
-    echo -e "  ${GREEN}[2]${NC} 访问端口    $( port_in_use "$menu_port" && echo "${RED}${menu_port}（已占用）${NC}" || echo "${BOLD}${menu_port}${NC}" )"
 
-    if [ -n "$menu_auth_token" ]; then
-      local masked_token="${menu_auth_token:0:4}****${menu_auth_token: -4}"
-      [ ${#menu_auth_token} -le 8 ] && masked_token="****"
-      echo -e "  ${GREEN}[3]${NC} 管理令牌    ${BOLD}${masked_token}${NC}"
-    else
-      echo -e "  ${GREEN}[3]${NC} 管理令牌    ${RED}（未设置，必填）${NC}"
+    if [ "$menu_page" = "main" ]; then
+      # ─── 主菜单 ───
+      echo -e "  ${CYAN}──────────────────────────────────${NC}"
+      if [ "$is_installed" = "yes" ]; then
+        echo -e "  ${GREEN}[1]${NC} 重新安装 / 修改配置"
+      else
+        echo -e "  ${GREEN}[1]${NC} 安装部署"
+      fi
+      echo -e "  ${GREEN}[2]${NC} 查看状态"
+      echo -e "  ${GREEN}[3]${NC} 修复依赖"
+      if [ "$is_installed" = "yes" ]; then
+        echo -e "  ${GREEN}[4]${NC} 卸载（保留数据）"
+        echo -e "  ${GREEN}[5]${NC} 完整卸载（删除数据）"
+      else
+        echo -e "  ${DIM}[4] 卸载（未安装）${NC}"
+        echo -e "  ${DIM}[5] 完整卸载（未安装）${NC}"
+      fi
+      echo ""
+      echo -e "  ${CYAN}──────────────────────────────────${NC}"
+      echo -e "  ${BOLD}${YELLOW}[q] 退出${NC}"
+
+      printf '\033[J\033[?25h'
+      echo ""
+      read -rp "  请选择 [1-5, q]: " choice
+
+      case "$choice" in
+        1)
+          menu_page="install"
+          ;;
+        2)
+          printf '\033[?25h'
+          show_status_info
+          echo ""
+          read -rp "  按回车返回菜单..."
+          ;;
+        3)
+          printf '\033[?25h'
+          do_repair
+          echo ""
+          read -rp "  按回车返回菜单..."
+          ;;
+        4)
+          if [ "$is_installed" = "yes" ]; then
+            printf '\033[?25h'
+            echo ""
+            echo -e "  ${YELLOW}确认卸载（保留数据）？[y/N]${NC}"
+            read -rp "  " confirm
+            if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+              do_uninstall
+              is_installed="no"
+              svc_status="未安装"
+              echo ""
+              read -rp "  按回车返回菜单..."
+            fi
+          fi
+          ;;
+        5)
+          if [ "$is_installed" = "yes" ]; then
+            printf '\033[?25h'
+            echo ""
+            echo -e "  ${RED}⚠ 完整卸载将删除所有数据！确认？[y/N]${NC}"
+            read -rp "  " confirm
+            if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+              do_uninstall_all
+              is_installed="no"
+              svc_status="未安装"
+              echo ""
+              read -rp "  按回车返回菜单..."
+            fi
+          fi
+          ;;
+        q|Q)
+          printf '\033[?25h'
+          echo -e "  ${YELLOW}已退出${NC}"
+          exit 0
+          ;;
+      esac
+
+    elif [ "$menu_page" = "install" ]; then
+      # ─── 安装配置子菜单 ───
+      echo -e "  ${CYAN}──────────────────────────────────${NC}"
+      echo -e "  ${DIM}安装配置${NC}"
+      echo -e "  ${GREEN}[1]${NC} 安装模式    $( [ "$menu_install_mode" = "prebuilt" ] && echo "${GREEN}预编译下载（推荐）${NC}" || echo "${YELLOW}源码编译${NC}" )"
+      echo -e "  ${GREEN}[2]${NC} 访问端口    $( port_in_use "$menu_port" && echo "${RED}${menu_port}（已占用）${NC}" || echo "${BOLD}${menu_port}${NC}" )"
+
+      if [ -n "$menu_auth_token" ]; then
+        local masked_token="${menu_auth_token:0:4}****${menu_auth_token: -4}"
+        [ ${#menu_auth_token} -le 8 ] && masked_token="****"
+        echo -e "  ${GREEN}[3]${NC} 管理令牌    ${BOLD}${masked_token}${NC}"
+      else
+        echo -e "  ${GREEN}[3]${NC} 管理令牌    ${RED}（未设置，必填）${NC}"
+      fi
+
+      if [ -n "$menu_proxy_token" ]; then
+        local masked_proxy="${menu_proxy_token:0:4}****${menu_proxy_token: -4}"
+        [ ${#menu_proxy_token} -le 8 ] && masked_proxy="****"
+        echo -e "  ${GREEN}[4]${NC} 代理令牌    ${BOLD}${masked_proxy}${NC}"
+      else
+        echo -e "  ${GREEN}[4]${NC} 代理令牌    ${RED}（未设置，必填）${NC}"
+      fi
+
+      local can_start="yes"
+      [ -z "$menu_auth_token" ] && can_start="no"
+      [ -z "$menu_proxy_token" ] && can_start="no"
+
+      echo ""
+      echo -e "  ${CYAN}──────────────────────────────────${NC}"
+      if [ "$can_start" = "yes" ]; then
+        echo -e "  ${BOLD}${GREEN}[0] 开始安装${NC}    ${BOLD}${YELLOW}[b] 返回${NC}    ${YELLOW}[q] 退出${NC}"
+      else
+        echo -e "  ${DIM}[0] 开始安装（请先设置令牌）${NC}    ${YELLOW}[b] 返回${NC}    ${YELLOW}[q] 退出${NC}"
+      fi
+
+      printf '\033[J\033[?25h'
+      echo ""
+      read -rp "  请选择 [0-4, b, q]: " choice
+
+      case "$choice" in
+        1)
+          if [ "$menu_install_mode" = "prebuilt" ]; then
+            menu_install_mode="source"
+          else
+            menu_install_mode="prebuilt"
+          fi
+          ;;
+        2)
+          read -rp "  请输入端口号 (1-65535): " new_port
+          if [[ "$new_port" =~ ^[0-9]+$ ]] && [ "$new_port" -ge 1 ] && [ "$new_port" -le 65535 ]; then
+            menu_port="$new_port"
+          else
+            echo -e "  ${RED}无效端口号，按回车继续...${NC}"
+            read -r
+          fi
+          ;;
+        3)
+          echo -e "  ${YELLOW}管理令牌 = 管理后台登录密码${NC}"
+          read -rp "  请输入: " new_token
+          if [ -n "$new_token" ] && [ "$new_token" != "change-me-admin-token" ]; then
+            menu_auth_token="$new_token"
+          else
+            echo -e "  ${RED}令牌不能为空或使用默认值，按回车继续...${NC}"
+            read -r
+          fi
+          ;;
+        4)
+          echo -e "  ${YELLOW}代理令牌 = 下游 API 调用密钥${NC}"
+          read -rp "  请输入: " new_proxy
+          if [ -n "$new_proxy" ] && [ "$new_proxy" != "change-me-proxy-sk-token" ]; then
+            menu_proxy_token="$new_proxy"
+          else
+            echo -e "  ${RED}令牌不能为空或使用默认值，按回车继续...${NC}"
+            read -r
+          fi
+          ;;
+        0)
+          if [ "$can_start" = "no" ]; then
+            echo -e "  ${RED}请先设置管理令牌和代理令牌！按回车继续...${NC}"
+            read -r
+            continue
+          fi
+          INSTALL_MODE="$menu_install_mode"
+          ACTUAL_PORT="$menu_port"
+          CLI_AUTH_TOKEN="$menu_auth_token"
+          CLI_PROXY_TOKEN="$menu_proxy_token"
+          printf '\033[?25h'
+          return 0
+          ;;
+        b|B)
+          menu_page="main"
+          ;;
+        q|Q)
+          printf '\033[?25h'
+          echo -e "  ${YELLOW}已退出${NC}"
+          exit 0
+          ;;
+      esac
     fi
-
-    if [ -n "$menu_proxy_token" ]; then
-      local masked_proxy="${menu_proxy_token:0:4}****${menu_proxy_token: -4}"
-      [ ${#menu_proxy_token} -le 8 ] && masked_proxy="****"
-      echo -e "  ${GREEN}[4]${NC} 代理令牌    ${BOLD}${masked_proxy}${NC}"
-    else
-      echo -e "  ${GREEN}[4]${NC} 代理令牌    ${RED}（未设置，必填）${NC}"
-    fi
-
-    local can_start="yes"
-    [ -z "$menu_auth_token" ] && can_start="no"
-    [ -z "$menu_proxy_token" ] && can_start="no"
-
-    echo ""
-    echo -e "  ${CYAN}──────────────────────────────────${NC}"
-    if [ "$can_start" = "yes" ]; then
-      echo -e "  ${BOLD}${GREEN}[0] 开始安装${NC}    ${BOLD}${YELLOW}[q] 退出${NC}"
-    else
-      echo -e "  ${DIM}[0] 开始安装（请先设置令牌）    [q] 退出${NC}"
-    fi
-
-    # 清除菜单下方残留内容，然后显示光标
-    printf '\033[J\033[?25h'
-
-    echo ""
-    read -rp "  请选择 [0-4, q]: " choice
-
-    case "$choice" in
-      1)
-        if [ "$menu_install_mode" = "prebuilt" ]; then
-          menu_install_mode="source"
-        else
-          menu_install_mode="prebuilt"
-        fi
-        ;;
-      2)
-        read -rp "  请输入端口号 (1-65535): " new_port
-        if [[ "$new_port" =~ ^[0-9]+$ ]] && [ "$new_port" -ge 1 ] && [ "$new_port" -le 65535 ]; then
-          menu_port="$new_port"
-        else
-          echo -e "  ${RED}无效端口号，按回车继续...${NC}"
-          read -r
-        fi
-        ;;
-      3)
-        echo -e "  ${YELLOW}管理令牌 = 管理后台登录密码${NC}"
-        read -rp "  请输入: " new_token
-        if [ -n "$new_token" ] && [ "$new_token" != "change-me-admin-token" ]; then
-          menu_auth_token="$new_token"
-        else
-          echo -e "  ${RED}令牌不能为空或使用默认值，按回车继续...${NC}"
-          read -r
-        fi
-        ;;
-      4)
-        echo -e "  ${YELLOW}代理令牌 = 下游 API 调用密钥${NC}"
-        read -rp "  请输入: " new_proxy
-        if [ -n "$new_proxy" ] && [ "$new_proxy" != "change-me-proxy-sk-token" ]; then
-          menu_proxy_token="$new_proxy"
-        else
-          echo -e "  ${RED}令牌不能为空或使用默认值，按回车继续...${NC}"
-          read -r
-        fi
-        ;;
-      0)
-        if [ "$can_start" = "no" ]; then
-          echo -e "  ${RED}请先设置管理令牌和代理令牌！按回车继续...${NC}"
-          read -r
-          continue
-        fi
-        INSTALL_MODE="$menu_install_mode"
-        ACTUAL_PORT="$menu_port"
-        CLI_AUTH_TOKEN="$menu_auth_token"
-        CLI_PROXY_TOKEN="$menu_proxy_token"
-        printf '\033[?25h'  # 确保光标恢复
-        return 0
-        ;;
-      q|Q)
-        printf '\033[?25h'  # 确保光标恢复
-        echo -e "  ${YELLOW}已取消${NC}"
-        exit 0
-        ;;
-    esac
   done
+}
+
+# ═══════════════════════════════════════════════════════════
+# 状态查询
+# ═══════════════════════════════════════════════════════════
+show_status_info() {
+  echo ""
+  echo -e "${BOLD}${CYAN}  ── 服务状态 ──${NC}"
+  echo ""
+
+  if [ ! -f "${MARKER_FILE}" ]; then
+    echo -e "  ${YELLOW}Metapi 尚未安装${NC}"
+    return 0
+  fi
+
+  # 安装信息
+  local install_mode; install_mode=$(grep '^install_mode=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2 || echo "未知")
+  local install_time; install_time=$(grep '^install_time=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2 || echo "未知")
+  echo -e "  安装模式:  ${BOLD}${install_mode}${NC}"
+  echo -e "  安装时间:  ${BOLD}${install_time}${NC}"
+
+  # 服务状态
+  echo ""
+  if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+    echo -e "  服务状态:  ${GREEN}${BOLD}运行中${NC}"
+  else
+    echo -e "  服务状态:  ${RED}${BOLD}已停止${NC}"
+  fi
+
+  # 端口
+  local configured_port; configured_port=$(grep '^PORT=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2 || echo "${DEFAULT_PORT}")
+  echo -e "  监听端口:  ${BOLD}${configured_port}${NC}"
+
+  # 进程信息
+  local pid; pid=$(systemctl show "${SERVICE_NAME}" --property=MainPID --value 2>/dev/null || echo "")
+  if [ -n "$pid" ] && [ "$pid" != "0" ]; then
+    echo -e "  进程 PID:  ${BOLD}${pid}${NC}"
+    local mem_info; mem_info=$(ps -p "$pid" -o rss= 2>/dev/null | awk '{printf "%.0fMB", $1/1024}')
+    echo -e "  内存占用:  ${BOLD}${mem_info}${NC}"
+    local uptime_info; uptime_info=$(ps -p "$pid" -o etime= 2>/dev/null | xargs || echo "")
+    [ -n "$uptime_info" ] && echo -e "  运行时长:  ${BOLD}${uptime_info}${NC}"
+  fi
+
+  # 访问地址
+  local ip_addr; ip_addr=$(hostname -I 2>/dev/null | awk '{print $1}' || echo '服务器IP')
+  echo -e "  访问地址:  ${CYAN}http://${ip_addr}:${configured_port}${NC}"
+
+  # 磁盘占用
+  local app_size; app_size=$(du -sh "${APP_DIR}" 2>/dev/null | awk '{print $1}' || echo "未知")
+  echo -e "  磁盘占用:  ${BOLD}${app_size}${NC}"
+
+  # 最近日志（最后3行）
+  echo ""
+  echo -e "  ${DIM}── 最近日志 ──${NC}"
+  journalctl -u "${SERVICE_NAME}" --no-pager -n 3 2>/dev/null | sed 's/^/  /' || echo "  （无日志）"
 }
 
 # ═══════════════════════════════════════════════════════════
