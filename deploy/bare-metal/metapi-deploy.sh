@@ -69,6 +69,10 @@ log()     { local lvl="$1"; shift; echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$lvl] $
 
 separator() { echo -e "${CYAN}──────────────────────────────────────────────────────────${NC}"; }
 
+prompt_read() {
+  read -rp "$1" "$2" < /dev/tty
+}
+
 # ═══════════════════════════════════════════════════════════
 # 终端清理（退出/中断时调用）
 # ═══════════════════════════════════════════════════════════
@@ -792,7 +796,7 @@ show_interactive_menu() {
       echo -e "  ${CYAN}0)${NC} 退出"
       echo ""
       local max_opt=7; [ "$is_installed" = "yes" ] && max_opt=9
-      read -rp "  请输入数字 [0-${max_opt}]: " choice
+      prompt_read "  请输入数字 [0-${max_opt}]: " choice
       echo ""
 
       case "$choice" in
@@ -814,14 +818,14 @@ show_interactive_menu() {
           deregister_trap
           show_status_info
           echo ""
-          read -rp "  按回车键返回菜单" _
+          prompt_read "  按回车键返回菜单" _
           register_trap
           ;;
         3)
           deregister_trap
           do_repair
           echo ""
-          read -rp "  按回车键返回菜单" _
+          prompt_read "  按回车键返回菜单" _
           register_trap
           ;;
         4)
@@ -845,7 +849,7 @@ show_interactive_menu() {
               fi
             fi
             echo ""
-            read -rp "  按回车键返回菜单" _
+            prompt_read "  按回车键返回菜单" _
             register_trap
           fi
           ;;
@@ -860,7 +864,7 @@ show_interactive_menu() {
               echo -e "  ${RED}服务停止失败！${NC}"
             fi
             echo ""
-            read -rp "  按回车键返回菜单" _
+            prompt_read "  按回车键返回菜单" _
             register_trap
           fi
           ;;
@@ -868,12 +872,12 @@ show_interactive_menu() {
           if [ "$is_installed" = "yes" ]; then
             deregister_trap
             echo -e "  ${YELLOW}卸载将保留 /opt/metapi/data 目录下的数据${NC}"
-            read -rp "  确认卸载？[y/N]: " confirm
+            prompt_read "  确认卸载？[y/N]: " confirm
             echo ""
             if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
               do_uninstall
               echo ""
-              read -rp "  按回车键返回菜单" _
+              prompt_read "  按回车键返回菜单" _
             fi
             register_trap
           fi
@@ -882,12 +886,12 @@ show_interactive_menu() {
           if [ "$is_installed" = "yes" ]; then
             deregister_trap
             echo -e "  ${RED}⚠ 完整卸载将删除所有数据，不可恢复！${NC}"
-            read -rp "  确认完整卸载？[y/N]: " confirm
+            prompt_read "  确认完整卸载？[y/N]: " confirm
             echo ""
             if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
               do_uninstall_all
               echo ""
-              read -rp "  按回车键返回菜单" _
+              prompt_read "  按回车键返回菜单" _
             fi
             register_trap
           fi
@@ -897,7 +901,7 @@ show_interactive_menu() {
             deregister_trap
             do_upgrade
             echo ""
-            read -rp "  按回车键返回菜单" _
+            prompt_read "  按回车键返回菜单" _
             register_trap
           fi
           ;;
@@ -906,7 +910,7 @@ show_interactive_menu() {
             deregister_trap
             view_service_logs
             echo ""
-            read -rp "  按回车键返回菜单" _
+            prompt_read "  按回车键返回菜单" _
             register_trap
           fi
           ;;
@@ -918,7 +922,7 @@ show_interactive_menu() {
           ;;
         *)
           echo -e "  ${RED}无效选择，请重新输入${NC}"
-          read -rp "  按回车键继续" _
+          prompt_read "  按回车键继续" _
           ;;
       esac
 
@@ -959,7 +963,7 @@ show_interactive_menu() {
       echo -e "  ${CYAN}0)${NC} 开始安装"
       echo -e "  ${CYAN}b)${NC} 返回主菜单"
       echo ""
-      read -rp "  请输入 [0-4, b]: " choice
+      prompt_read "  请输入 [0-4, b]: " choice
       echo ""
 
       case "$choice" in
@@ -972,7 +976,7 @@ show_interactive_menu() {
           ;;
         2)
           deregister_trap
-          read -rp "  请输入端口号 [1-65535]: " new_port
+          prompt_read "  请输入端口号 [1-65535]: " new_port
           register_trap
           if [[ "$new_port" =~ ^[0-9]+$ ]] && [ "$new_port" -ge 1 ] && [ "$new_port" -le 65535 ]; then
             menu_port="$new_port"
@@ -980,12 +984,12 @@ show_interactive_menu() {
           else
             echo -e "  ${RED}无效端口号${NC}"
           fi
-          read -rp "  按回车键继续" _
+          prompt_read "  按回车键继续" _
           ;;
         3)
           echo -e "  ${YELLOW}管理令牌 = 管理后台登录密码${NC}"
           deregister_trap
-          read -rp "  请输入: " new_token
+          prompt_read "  请输入: " new_token
           register_trap
           if [ -n "$new_token" ] && [ "$new_token" != "change-me-admin-token" ]; then
             menu_auth_token="$new_token"
@@ -993,12 +997,12 @@ show_interactive_menu() {
           else
             echo -e "  ${RED}令牌不能为空或使用默认值${NC}"
           fi
-          read -rp "  按回车键继续" _
+          prompt_read "  按回车键继续" _
           ;;
         4)
           echo -e "  ${YELLOW}代理令牌 = 下游 API 调用密钥${NC}"
           deregister_trap
-          read -rp "  请输入: " new_proxy
+          prompt_read "  请输入: " new_proxy
           register_trap
           if [ -n "$new_proxy" ] && [ "$new_proxy" != "change-me-proxy-sk-token" ]; then
             menu_proxy_token="$new_proxy"
@@ -1006,12 +1010,12 @@ show_interactive_menu() {
           else
             echo -e "  ${RED}令牌不能为空或使用默认值${NC}"
           fi
-          read -rp "  按回车键继续" _
+          prompt_read "  按回车键继续" _
           ;;
         0)
           if [ "$can_start" = "no" ]; then
             echo -e "  ${RED}请先设置管理令牌和代理令牌！${NC}"
-            read -rp "  按回车键继续" _
+            prompt_read "  按回车键继续" _
             continue
           fi
           INSTALL_MODE="$menu_install_mode"
@@ -1032,7 +1036,7 @@ show_interactive_menu() {
           ;;
         *)
           echo -e "  ${RED}无效选择，请重新输入${NC}"
-          read -rp "  按回车键继续" _
+          prompt_read "  按回车键继续" _
           ;;
       esac
     fi
@@ -1372,7 +1376,7 @@ do_upgrade() {
 
   echo ""
   echo -e "  ${YELLOW}版本: ${latest_version} | 架构: ${arch}${NC}"
-  read -rp "  确认升级？[y/N]: " confirm
+  prompt_read "  确认升级？[y/N]: " confirm
   echo ""
   [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && { info "已取消"; return 0; }
 
