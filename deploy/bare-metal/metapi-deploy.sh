@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 #
 # ╔════════════════════════════════════════════════════════════╗
-# ║  Metapi 一键部署脚本 v5 (Ubuntu 22.04)                    ║
-# ║  交互菜单 → 自动检测平台 → 下载预编译包 → 安装 → 启动    ║
+# ║  Metapi 一键部署脚本 v6 (Ubuntu/Debian)                    ║
+# ║  交互菜单 → 环境检查 → 残留清理 → 下载预编译包 → 启动     ║
 # ╚════════════════════════════════════════════════════════════╝
 #
 # 用法:
 #   sudo bash metapi-deploy.sh                    # 交互式菜单部署
-#   sudo bash metapi-deploy.sh --source           # 强制源码编译模式
 #   sudo bash metapi-deploy.sh --uninstall        # 卸载（保留数据）
 #   sudo bash metapi-deploy.sh --uninstall-all    # 完整卸载
 #   sudo bash metapi-deploy.sh --repair           # 依赖修复
@@ -18,9 +17,6 @@
 
 set -uo pipefail
 
-# ═══════════════════════════════════════════════════════════
-# 常量定义
-# ═══════════════════════════════════════════════════════════
 readonly APP_NAME="metapi"
 readonly APP_DIR="/opt/metapi"
 readonly APP_USER="metapi"
@@ -31,32 +27,24 @@ readonly DATA_DIR="${APP_DIR}/data"
 readonly ENV_FILE="${APP_DIR}/.env"
 readonly LOG_DIR="/var/log/${APP_NAME}"
 readonly LOG_FILE="${LOG_DIR}/deploy.log"
-readonly BUILD_LOG="${LOG_DIR}/build.log"
 readonly NODE_MAJOR=22
-readonly REPO_URL="https://github.com/zczy-k/metapi.git"
 readonly RELEASE_API="https://api.github.com/repos/zczy-k/metapi/releases/latest"
 readonly SCRIPT_URL="https://raw.githubusercontent.com/zczy-k/metapi/main/deploy/bare-metal/metapi-deploy.sh"
 readonly DEFAULT_PORT=4000
 readonly MARKER_FILE="${APP_DIR}/.metapi_installed"
-readonly MARKER_VERSION="5"
+readonly MARKER_VERSION="6"
 readonly SWAP_FILE="/swapfile_metapi"
 readonly SYSCTL_CONF="/etc/sysctl.d/99-metapi.conf"
 
-# 运行时变量
 ACTUAL_PORT="${DEFAULT_PORT}"
-INSTALL_MODE="prebuilt"  # prebuilt | source
-FORCE_MODE=""            # --source / --uninstall / --uninstall-all / --repair
+FORCE_MODE=""
 CLI_AUTH_TOKEN=""
 CLI_PROXY_TOKEN=""
-SKIP_MENU=0              # 跳过交互菜单
+SKIP_MENU=0
 
-# 步骤追踪
 declare -a COMPLETED_STEPS=()
 declare -a FAILED_STEPS=()
 
-# ═══════════════════════════════════════════════════════════
-# 颜色
-# ═══════════════════════════════════════════════════════════
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'
 
@@ -88,21 +76,16 @@ prompt_read_silent() {
   echo ""
 }
 
-# ═══════════════════════════════════════════════════════════
-# 终端清理（退出/中断时调用）
-# ═══════════════════════════════════════════════════════════
 cleanup_terminal() {
-  printf '\033[0m'            # 重置属性
-  stty echo 2>/dev/null      # 确保回显开启
+  printf '\033[0m'
+  stty echo 2>/dev/null
 }
 
-# SIGINT 捕获：防止 Ctrl+C 弄乱终端
 trap_cleanup() {
   cleanup_terminal
   echo -e "\n  ${YELLOW}操作已取消，返回菜单...${NC}"
 }
 
-# 注册陷阱（仅在交互菜单运行时生效）
 register_trap() {
   trap 'trap_cleanup' INT
   trap 'trap_cleanup' TSTP
@@ -112,13 +95,9 @@ deregister_trap() {
   trap - INT TSTP
 }
 
-# ═══════════════════════════════════════════════════════════
-# 命令行参数解析
-# ═══════════════════════════════════════════════════════════
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --source)         FORCE_MODE="source"; INSTALL_MODE="source"; shift ;;
       --uninstall)      FORCE_MODE="uninstall"; shift ;;
       --uninstall-all)  FORCE_MODE="uninstall-all"; shift ;;
       --repair)         FORCE_MODE="repair"; shift ;;
@@ -130,7 +109,6 @@ parse_args() {
         echo ""
         echo "选项:"
         echo "  (无)              交互式菜单部署"
-        echo "  --source          强制源码编译模式"
         echo "  --uninstall       卸载（保留数据）"
         echo "  --uninstall-all   完整卸载（不保留数据）"
         echo "  --repair          依赖修复"
@@ -144,9 +122,6 @@ parse_args() {
   done
 }
 
-# ═══════════════════════════════════════════════════════════
-# 步骤包装器
-# ═══════════════════════════════════════════════════════════
 run_step() {
   local step_name="$1"; shift
   local step_fn="$1"; shift
@@ -168,9 +143,6 @@ run_step() {
   fi
 }
 
-# ═══════════════════════════════════════════════════════════
-# 失败报告
-# ═══════════════════════════════════════════════════════════
 show_failure_report() {
   echo ""
   echo -e "${BOLD}${RED}╔══════════════════════════════════════════════╗${NC}"
@@ -202,9 +174,6 @@ show_failure_report() {
   echo ""
 }
 
-# ═══════════════════════════════════════════════════════════
-# 前置检查
-# ═══════════════════════════════════════════════════════════
 preflight_check() {
   if [ "$(id -u)" -ne 0 ]; then
     error "需要 root 权限，请使用: sudo bash $0"
@@ -219,12 +188,9 @@ preflight_check() {
 
   mkdir -p "${LOG_DIR}"
   touch "${LOG_FILE}"
-  log "INFO" "===== 脚本 v5 启动 ====="
+  log "INFO" "===== 脚本 v6 启动 ====="
 }
 
-# ═══════════════════════════════════════════════════════════
-# 架构自动检测
-# ═══════════════════════════════════════════════════════════
 detect_arch() {
   local arch; arch=$(uname -m)
   case "$arch" in
@@ -241,9 +207,6 @@ detect_os() {
   echo "${ID:-unknown}"
 }
 
-# ═══════════════════════════════════════════════════════════
-# 资源检测
-# ═══════════════════════════════════════════════════════════
 get_memory_mb()   { awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo; }
 get_avail_mb()    { awk '/MemAvailable/ {printf "%d", $2/1024}' /proc/meminfo; }
 get_disk_mb()     { local kb; kb=$(df -P /opt 2>/dev/null | awk 'NR==2{print $4}'); echo $(( kb / 1024 )); }
@@ -257,17 +220,11 @@ get_memory_limit() {
   fi
 }
 
-# ═══════════════════════════════════════════════════════════
-# 网络检测
-# ═══════════════════════════════════════════════════════════
 check_network() {
   local target="${1:-https://github.com}" timeout="${2:-10}"
   curl -sf --connect-timeout "$timeout" --max-time "$timeout" "$target" >/dev/null 2>&1
 }
 
-# ═══════════════════════════════════════════════════════════
-# GitHub Release API
-# ═══════════════════════════════════════════════════════════
 get_latest_release() {
   local api_url="${1:-${RELEASE_API}}"
   curl -sL --connect-timeout 15 --max-time 15 \
@@ -289,9 +246,6 @@ get_release_asset_url() {
   echo "$release_info" | grep -oP '"browser_download_url"\s*:\s*"\K[^"]+' 2>/dev/null | grep "linux-${target_arch}" | head -1
 }
 
-# ═══════════════════════════════════════════════════════════
-# 端口自动检测
-# ═══════════════════════════════════════════════════════════
 port_in_use() { ss -tlnp 2>/dev/null | grep -qP ":${1}\b"; }
 
 find_available_port() {
@@ -314,9 +268,6 @@ auto_resolve_port() {
   ACTUAL_PORT="$new_port"
 }
 
-# ═══════════════════════════════════════════════════════════
-# 安装 Node.js 运行时
-# ═══════════════════════════════════════════════════════════
 install_node() {
   if command -v node &>/dev/null; then
     local major; major=$(node -v | sed 's/v//' | cut -d. -f1)
@@ -357,33 +308,128 @@ install_node() {
   return 1
 }
 
-# ═══════════════════════════════════════════════════════════
-# 安装系统编译依赖（源码模式专用）
-# ═══════════════════════════════════════════════════════════
-install_build_deps() {
-  info "安装编译依赖..."
-  export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
-  apt-get update -qq 2>&1 | tail -3 >> "${LOG_FILE}"
-  apt-get install -y -qq curl git python3 make g++ ca-certificates 2>&1 || {
-    dpkg --configure -a 2>/dev/null
-    apt-get install -f -y 2>/dev/null
-    apt-get install -y -qq curl git python3 make g++ ca-certificates 2>&1
-  }
-  success "编译依赖安装完成"
+pre_install_cleanup() {
+  echo ""
+  echo -e "${BOLD}${CYAN}  ── 环境检查与残留清理 ──${NC}"
+  echo ""
+
+  info "检查系统环境..."
+  local arch; arch=$(detect_arch)
+  if [ "$arch" = "unknown" ]; then
+    error "无法识别系统架构 ($(uname -m))"
+    return 1
+  fi
+
+  local mem_mb; mem_mb=$(get_memory_mb)
+  local disk_mb; disk_mb=$(get_disk_mb)
+  info "架构: ${arch} | 内存: ${mem_mb}MB | 磁盘: ${disk_mb}MB 可用"
+
+  if [ "$disk_mb" -lt 300 ]; then
+    error "磁盘可用空间仅 ${disk_mb}MB，至少需要 300MB"
+    return 1
+  fi
+
+  if ! check_network "https://github.com" 10; then
+    error "无法连接 GitHub，请检查网络"
+    return 1
+  fi
+
+  echo ""
+  info "检查残留文件..."
+
+  local found_residual=0
+
+  if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+    warn "发现正在运行的 ${SERVICE_NAME} 服务，正在停止..."
+    systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
+    found_residual=1
+  fi
+
+  if [ -f "${SERVICE_FILE}" ]; then
+    warn "发现残留 systemd 服务文件，正在清理..."
+    systemctl disable "${SERVICE_NAME}" 2>/dev/null || true
+    rm -f "${SERVICE_FILE}"
+    systemctl daemon-reload 2>/dev/null || true
+    found_residual=1
+  fi
+
+  if [ -f "${SERVICE_FILE}.bak" ] || [ -f "/etc/systemd/system/${SERVICE_NAME}.service.bak" ]; then
+    warn "发现残留服务备份文件，正在清理..."
+    rm -f "${SERVICE_FILE}.bak" "/etc/systemd/system/${SERVICE_NAME}.service.bak"
+    found_residual=1
+  fi
+
+  if id "${APP_USER}" &>/dev/null; then
+    warn "发现残留用户 '${APP_USER}'，正在清理..."
+    userdel "${APP_USER}" 2>/dev/null || true
+    found_residual=1
+  fi
+
+  if [ -f "${SWAP_FILE}" ]; then
+    warn "发现残留 Swap 文件，正在清理..."
+    swapoff "${SWAP_FILE}" 2>/dev/null || true
+    rm -f "${SWAP_FILE}"
+    sed -i "\|${SWAP_FILE}|d" /etc/fstab 2>/dev/null || true
+    found_residual=1
+  fi
+
+  if [ -f "${SYSCTL_CONF}" ]; then
+    warn "发现残留 sysctl 配置，正在清理..."
+    rm -f "${SYSCTL_CONF}"
+    found_residual=1
+  fi
+
+  if [ -d "${APP_DIR}" ]; then
+    local has_data="no"
+    [ -d "${APP_DIR}/data" ] && [ "$(ls -A "${APP_DIR}/data" 2>/dev/null)" ] && has_data="yes"
+    local has_env="no"
+    [ -f "${APP_DIR}/.env" ] && has_env="yes"
+
+    if [ "$has_data" = "yes" ] || [ "$has_env" = "yes" ]; then
+      info "发现已有配置/数据，将保留 .env 和 data/ 目录"
+      if [ -f "${ENV_FILE}" ]; then
+        cp -a "${ENV_FILE}" "/tmp/metapi_env_cleanup_$$"
+      fi
+      if [ -d "${DATA_DIR}" ]; then
+        cp -a "${DATA_DIR}" "/tmp/metapi_data_cleanup_$$"
+      fi
+      rm -rf "${APP_DIR:?}"/* "${APP_DIR}"/.[!.]* 2>/dev/null || true
+      [ -f "/tmp/metapi_env_cleanup_$$" ] && mv "/tmp/metapi_env_cleanup_$$" "${ENV_FILE}"
+      [ -d "/tmp/metapi_data_cleanup_$$" ] && mv "/tmp/metapi_data_cleanup_$$" "${APP_DIR}/data"
+      found_residual=1
+    else
+      warn "发现残留安装目录，正在清理..."
+      rm -rf "${APP_DIR}"
+      found_residual=1
+    fi
+  fi
+
+  if [ -d "${LOG_DIR}" ]; then
+    rm -rf "${LOG_DIR}"
+    mkdir -p "${LOG_DIR}"
+    touch "${LOG_FILE}"
+    found_residual=1
+  fi
+
+  rm -f "${MARKER_FILE}" 2>/dev/null
+
+  if [ "$found_residual" -eq 1 ]; then
+    success "残留清理完成"
+  else
+    success "环境检查通过，无残留文件"
+  fi
+
+  echo ""
 }
 
-# ═══════════════════════════════════════════════════════════
-# 下载预编译包
-# ═══════════════════════════════════════════════════════════
 download_prebuilt() {
   local arch; arch=$(detect_arch)
 
   info "系统架构: ${arch}"
 
   if [ "$arch" = "unknown" ]; then
-    error "无法识别系统架构 ($(uname -m))，将切换到源码编译模式"
-    INSTALL_MODE="source"
-    return 0
+    error "无法识别系统架构 ($(uname -m))"
+    return 1
   fi
 
   info "查询最新版本..."
@@ -399,21 +445,16 @@ download_prebuilt() {
     error "无法获取 GitHub Release 信息"
     echo ""
     echo -e "  ${YELLOW}可能的原因:${NC}"
-    echo -e "    - 项目尚未发布预编译包"
     echo -e "    - 网络无法访问 GitHub API"
     echo -e "    - 国内服务器可能被限制（建议配置代理或使用镜像）"
     echo ""
-    echo -e "  ${CYAN}将自动切换到源码编译模式${NC}"
-    echo ""
-    INSTALL_MODE="source"
-    return 0
+    return 1
   fi
 
   local version; version=$(get_release_version "$release_info")
   if [ -z "$version" ]; then
-    warn "无法解析版本号，将切换到源码编译模式"
-    INSTALL_MODE="source"
-    return 0
+    error "无法解析版本号"
+    return 1
   fi
   info "最新版本: ${version}"
 
@@ -421,13 +462,12 @@ download_prebuilt() {
   download_url=$(get_release_asset_url "$release_info" "$arch")
 
   if [ -z "$download_url" ]; then
-    warn "未找到 ${arch} 架构的预编译包，将切换到源码编译模式"
+    error "未找到 ${arch} 架构的预编译包"
     echo -e "  ${YELLOW}已发布的资产:${NC}"
     echo "$release_info" | grep -oP '"browser_download_url"\s*:\s*"\K[^"]+' 2>/dev/null | while read -r url; do
       echo -e "    ${DIM}${url}${NC}"
     done
-    INSTALL_MODE="source"
-    return 0
+    return 1
   fi
 
   info "下载地址: ${download_url}"
@@ -436,7 +476,7 @@ download_prebuilt() {
   local filename; filename=$(basename "$download_url")
   local tmp_file="${tmp_dir}/${filename}"
 
-  info "下载预编译包 (约 $(echo "$filename" | grep -oP '[0-9]+MB' || echo '45MB'))..."
+  info "下载预编译包..."
   if ! curl -fSL --connect-timeout 30 --max-time 600 --progress-bar -o "$tmp_file" "$download_url" 2>&1; then
     error "下载失败，请检查网络"
     rm -rf "${tmp_dir}"
@@ -462,8 +502,8 @@ download_prebuilt() {
 
   info "安装到 ${APP_DIR}..."
 
-  if [ -f "${APP_DIR}/.env" ]; then
-    cp -a "${APP_DIR}/.env" "${tmp_dir}/env_backup"
+  if [ -f "${ENV_FILE}" ]; then
+    cp -a "${ENV_FILE}" "${tmp_dir}/env_backup"
   fi
   if [ -d "${APP_DIR}/data" ]; then
     cp -a "${APP_DIR}/data" "${tmp_dir}/data_backup"
@@ -483,54 +523,6 @@ download_prebuilt() {
   success "预编译包安装完成 (版本: ${version}, 架构: ${arch})"
 }
 
-# ═══════════════════════════════════════════════════════════
-# 源码编译
-# ═══════════════════════════════════════════════════════════
-clone_and_build() {
-  local orig_dir; orig_dir="$(pwd)"
-
-  info "克隆代码到 ${APP_DIR}..."
-
-  if [ -d "${APP_DIR}/.git" ]; then
-    cd "${APP_DIR}"
-    git fetch --all 2>&1 | tail -3
-    git reset --hard origin/main 2>&1 | tail -3
-  else
-    mkdir -p "${APP_DIR}"
-    git clone "${REPO_URL}" "${APP_DIR}" 2>&1 | tail -5
-    cd "${APP_DIR}"
-  fi
-
-  info "安装依赖..."
-  local retry=0
-  while [ $retry -lt 3 ]; do
-    retry=$((retry + 1))
-    if npm ci --ignore-scripts --no-audit --no-fund 2>&1 | tee -a "${BUILD_LOG}" | tail -5; then break; fi
-    warn "npm ci 失败 (尝试 ${retry}/3)"
-    [ $retry -lt 3 ] && sleep 5
-  done
-  [ $retry -ge 3 ] && { error "npm ci 失败"; cd "${orig_dir}"; return 1; }
-
-  info "重建原生模块..."
-  npm rebuild esbuild sharp better-sqlite3 --no-audit --no-fund 2>&1 | tail -5
-
-  info "构建前端..."
-  npm run build:web 2>&1 | tail -5 || { error "前端构建失败"; cd "${orig_dir}"; return 1; }
-
-  info "构建后端..."
-  npm run build:server 2>&1 | tail -5 || { error "后端构建失败"; cd "${orig_dir}"; return 1; }
-
-  npm prune --omit=dev --no-audit --no-fund 2>&1 | tail -3
-
-  [ ! -f "${APP_DIR}/dist/server/index.js" ] && { error "构建验证失败"; cd "${orig_dir}"; return 1; }
-
-  cd "${orig_dir}"
-  success "源码编译完成"
-}
-
-# ═══════════════════════════════════════════════════════════
-# 创建隔离用户
-# ═══════════════════════════════════════════════════════════
 create_user() {
   if id "${APP_USER}" &>/dev/null; then
     info "用户 '${APP_USER}' 已存在"
@@ -545,9 +537,6 @@ create_user() {
   success "用户创建完成"
 }
 
-# ═══════════════════════════════════════════════════════════
-# 配置环境变量
-# ═══════════════════════════════════════════════════════════
 configure_env() {
   if [ -f "${ENV_FILE}" ]; then
     info ".env 已存在，更新配置..."
@@ -572,7 +561,6 @@ configure_env() {
   local mem_limit; mem_limit=$(get_memory_limit)
 
   cat > "${ENV_FILE}" << EOF
-# Metapi 环境变量配置
 AUTH_TOKEN=${auth_token}
 PROXY_TOKEN=${proxy_token}
 PORT=${ACTUAL_PORT}
@@ -581,8 +569,6 @@ CHECKIN_CRON=0 8 * * *
 BALANCE_REFRESH_CRON=0 * * * *
 TZ=Asia/Shanghai
 NODE_OPTIONS=--max-old-space-size=${mem_limit}
-
-# 自动更新源
 UPDATE_CHECK_URL=${RELEASE_API}
 EOF
 
@@ -590,9 +576,6 @@ EOF
   success ".env 配置完成 (端口: ${ACTUAL_PORT})"
 }
 
-# ═══════════════════════════════════════════════════════════
-# 配置 Swap（低内存自动配置）
-# ═══════════════════════════════════════════════════════════
 configure_swap() {
   local total_mem; total_mem=$(get_memory_mb)
   local swap_mb; swap_mb=$(get_swap_mb)
@@ -628,9 +611,6 @@ configure_swap() {
   success "Swap 配置完成 (1GB)"
 }
 
-# ═══════════════════════════════════════════════════════════
-# 安装 systemd 服务
-# ═══════════════════════════════════════════════════════════
 install_systemd_service() {
   info "配置 systemd 服务..."
 
@@ -692,9 +672,6 @@ EOF
   success "systemd 服务配置完成"
 }
 
-# ═══════════════════════════════════════════════════════════
-# 设置权限
-# ═══════════════════════════════════════════════════════════
 set_permissions() {
   info "设置文件权限..."
   mkdir -p "${APP_DIR}/data"
@@ -705,9 +682,6 @@ set_permissions() {
   success "权限设置完成"
 }
 
-# ═══════════════════════════════════════════════════════════
-# 写入安装标记
-# ═══════════════════════════════════════════════════════════
 write_marker() {
   local current_version="unknown"
   if [ -f "${APP_DIR}/.build-info" ]; then
@@ -724,14 +698,10 @@ user=${APP_USER}
 dir=${APP_DIR}
 service=${SERVICE_FILE}
 port=${ACTUAL_PORT}
-install_mode=${INSTALL_MODE}
 EOF
   chown "${APP_USER}:${APP_USER}" "${MARKER_FILE}" 2>/dev/null
 }
 
-# ═══════════════════════════════════════════════════════════
-# 启动服务
-# ═══════════════════════════════════════════════════════════
 start_service() {
   info "启动服务..."
   systemctl start "${SERVICE_NAME}"
@@ -751,9 +721,6 @@ start_service() {
   return 1
 }
 
-# ═══════════════════════════════════════════════════════════
-# 防火墙提示
-# ═══════════════════════════════════════════════════════════
 show_firewall_hint() {
   echo ""
   separator
@@ -780,16 +747,12 @@ show_firewall_hint() {
   fi
 }
 
-# ═══════════════════════════════════════════════════════════
-# 交互式主菜单
-# ═══════════════════════════════════════════════════════════
 show_interactive_menu() {
   register_trap
 
   local arch; arch=$(detect_arch)
   local os; os=$(detect_os)
 
-  local menu_install_mode="${INSTALL_MODE}"
   local menu_port="${ACTUAL_PORT}"
   local menu_auth_token="${CLI_AUTH_TOKEN}"
   local menu_proxy_token="${CLI_PROXY_TOKEN}"
@@ -826,12 +789,7 @@ show_interactive_menu() {
     echo ""
 
     if [ "$menu_page" = "main" ]; then
-      # ─── 主菜单 ───
-      if [ "$is_installed" = "yes" ]; then
-        echo -e "  ${GREEN}1)${NC} 重新安装 / 修改配置"
-      else
-        echo -e "  ${GREEN}1)${NC} 安装部署"
-      fi
+      echo -e "  ${GREEN}1)${NC} 安装/重装部署"
       echo -e "  ${GREEN}2)${NC} 查看状态"
       echo -e "  ${GREEN}3)${NC} 修复依赖"
       if [ "$is_installed" = "yes" ]; then
@@ -861,7 +819,6 @@ show_interactive_menu() {
 
       case "$choice" in
         1)
-          # 进入安装配置子菜单
           if [ "$is_installed" = "yes" ] && [ -f "${ENV_FILE}" ]; then
             local env_port; env_port=$(grep '^PORT=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2)
             [ -n "$env_port" ] && menu_port="$env_port"
@@ -869,8 +826,6 @@ show_interactive_menu() {
             [ -n "$env_auth" ] && menu_auth_token="$env_auth"
             local env_proxy; env_proxy=$(grep '^PROXY_TOKEN=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2)
             [ -n "$env_proxy" ] && menu_proxy_token="$env_proxy"
-            local env_mode; env_mode=$(grep '^install_mode=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2)
-            [ -n "$env_mode" ] && menu_install_mode="$env_mode"
           fi
           menu_page="install"
           ;;
@@ -987,32 +942,27 @@ show_interactive_menu() {
       esac
 
     elif [ "$menu_page" = "install" ]; then
-      # ─── 安装配置子菜单 ───
-      echo -e "  ${CYAN}安装配置${NC}"
+      echo -e "  ${CYAN}部署配置${NC}"
       echo ""
-
-      local mode_label="预编译下载（推荐）"
-      [ "$menu_install_mode" = "source" ] && mode_label="源码编译"
-      echo -e "  ${GREEN}1)${NC} 安装模式:  ${BOLD}${mode_label}${NC}"
 
       local port_info="${menu_port}"
       port_in_use "$menu_port" && port_info="${menu_port} ${RED}(端口已占用)${NC}"
-      echo -e "  ${GREEN}2)${NC} 访问端口:  ${BOLD}${port_info}${NC}"
+      echo -e "  ${GREEN}1)${NC} 访问端口:  ${BOLD}${port_info}${NC}"
 
       if [ -n "$menu_auth_token" ]; then
         local masked_auth="${menu_auth_token:0:4}****${menu_auth_token: -4}"
         [ ${#menu_auth_token} -le 8 ] && masked_auth="****"
-        echo -e "  ${GREEN}3)${NC} 管理令牌:  ${BOLD}${masked_auth}${NC}"
+        echo -e "  ${GREEN}2)${NC} 管理令牌:  ${BOLD}${masked_auth}${NC}"
       else
-        echo -e "  ${GREEN}3)${NC} 管理令牌:  ${RED}（未设置，必填）${NC}"
+        echo -e "  ${GREEN}2)${NC} 管理令牌:  ${RED}（未设置，必填）${NC}"
       fi
 
       if [ -n "$menu_proxy_token" ]; then
         local masked_proxy="${menu_proxy_token:0:4}****${menu_proxy_token: -4}"
         [ ${#menu_proxy_token} -le 8 ] && masked_proxy="****"
-        echo -e "  ${GREEN}4)${NC} 代理令牌:  ${BOLD}${masked_proxy}${NC}"
+        echo -e "  ${GREEN}3)${NC} 代理令牌:  ${BOLD}${masked_proxy}${NC}"
       else
-        echo -e "  ${GREEN}4)${NC} 代理令牌:  ${RED}（未设置，必填）${NC}"
+        echo -e "  ${GREEN}3)${NC} 代理令牌:  ${RED}（未设置，必填）${NC}"
       fi
 
       local can_start="yes"
@@ -1023,18 +973,11 @@ show_interactive_menu() {
       echo -e "  ${CYAN}0)${NC} 开始安装"
       echo -e "  ${CYAN}b)${NC} 返回主菜单"
       echo ""
-      prompt_read "  请输入 [0-4, b]: " choice
+      prompt_read "  请输入 [0-3, b]: " choice
       echo ""
 
       case "$choice" in
         1)
-          if [ "$menu_install_mode" = "prebuilt" ]; then
-            menu_install_mode="source"
-          else
-            menu_install_mode="prebuilt"
-          fi
-          ;;
-        2)
           deregister_trap
           prompt_read "  请输入端口号 [1-65535]: " new_port
           register_trap
@@ -1046,7 +989,7 @@ show_interactive_menu() {
           fi
           prompt_read "  按回车键继续" _
           ;;
-        3)
+        2)
           echo -e "  ${YELLOW}管理令牌 = 管理后台登录密码${NC}"
           deregister_trap
           prompt_read_silent "  请输入: " new_token
@@ -1059,7 +1002,7 @@ show_interactive_menu() {
           fi
           prompt_read "  按回车键继续" _
           ;;
-        4)
+        3)
           echo -e "  ${YELLOW}代理令牌 = 下游 API 调用密钥${NC}"
           deregister_trap
           prompt_read_silent "  请输入: " new_proxy
@@ -1078,16 +1021,12 @@ show_interactive_menu() {
             prompt_read "  按回车键继续" _
             continue
           fi
-          INSTALL_MODE="$menu_install_mode"
           ACTUAL_PORT="$menu_port"
           CLI_AUTH_TOKEN="$menu_auth_token"
           CLI_PROXY_TOKEN="$menu_proxy_token"
 
           echo ""
           echo -e "  ${BOLD}── 安装摘要 ──${NC}"
-          local mode_label="预编译下载"
-          [ "$INSTALL_MODE" = "source" ] && mode_label="源码编译"
-          echo -e "  安装模式:  ${CYAN}${mode_label}${NC}"
           echo -e "  访问端口:  ${CYAN}${ACTUAL_PORT}${NC}"
           echo -e "  管理令牌:  ${CYAN}已设置${NC}"
           echo -e "  代理令牌:  ${CYAN}已设置${NC}"
@@ -1118,9 +1057,6 @@ show_interactive_menu() {
   done
 }
 
-# ═══════════════════════════════════════════════════════════
-# 状态查询
-# ═══════════════════════════════════════════════════════════
 show_status_info() {
   echo ""
   echo -e "${BOLD}${CYAN}  ── 服务状态 ──${NC}"
@@ -1131,15 +1067,11 @@ show_status_info() {
     return 0
   fi
 
-  # 安装信息
-  local install_mode; install_mode=$(grep '^install_mode=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2 || echo "未知")
   local install_time; install_time=$(grep '^install_time=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2 || echo "未知")
   local app_version; app_version=$(grep '^app_version=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2 || echo "未知")
   echo -e "  应用版本:  ${BOLD}${app_version}${NC}"
-  echo -e "  安装模式:  ${BOLD}${install_mode}${NC}"
   echo -e "  安装时间:  ${BOLD}${install_time}${NC}"
 
-  # 服务状态
   echo ""
   if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
     echo -e "  服务状态:  ${GREEN}${BOLD}运行中${NC}"
@@ -1147,11 +1079,9 @@ show_status_info() {
     echo -e "  服务状态:  ${RED}${BOLD}已停止${NC}"
   fi
 
-  # 端口
   local configured_port; configured_port=$(grep '^PORT=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2 || echo "${DEFAULT_PORT}")
   echo -e "  监听端口:  ${BOLD}${configured_port}${NC}"
 
-  # 进程信息
   local pid; pid=$(systemctl show "${SERVICE_NAME}" --property=MainPID --value 2>/dev/null || echo "")
   if [ -n "$pid" ] && [ "$pid" != "0" ]; then
     echo -e "  进程 PID:  ${BOLD}${pid}${NC}"
@@ -1161,28 +1091,21 @@ show_status_info() {
     [ -n "$uptime_info" ] && echo -e "  运行时长:  ${BOLD}${uptime_info}${NC}"
   fi
 
-  # 访问地址
   local ip_addr; ip_addr=$(hostname -I 2>/dev/null | awk '{print $1}' || echo '服务器IP')
   echo -e "  访问地址:  ${CYAN}http://${ip_addr}:${configured_port}${NC}"
 
-  # 磁盘占用
   local app_size; app_size=$(du -sh "${APP_DIR}" 2>/dev/null | awk '{print $1}' || echo "未知")
   echo -e "  磁盘占用:  ${BOLD}${app_size}${NC}"
 
-  # 最近日志（最后3行）
   echo ""
   echo -e "  ${DIM}── 最近日志 ──${NC}"
   journalctl -u "${SERVICE_NAME}" --no-pager -n 3 2>/dev/null | sed 's/^/  /' || echo "  （无日志）"
 }
 
-# ═══════════════════════════════════════════════════════════
-# 主流程：一键安装
-# ═══════════════════════════════════════════════════════════
 do_install() {
   COMPLETED_STEPS=()
   FAILED_STEPS=()
 
-  # 显示交互菜单（非交互模式跳过）
   if [ "$SKIP_MENU" -eq 0 ]; then
     show_interactive_menu
   else
@@ -1210,49 +1133,15 @@ do_install() {
   echo -e "  平台:    ${CYAN}${os} / ${arch}${NC}"
   echo -e "  内存:    ${CYAN}${mem_mb}MB${NC}"
   echo -e "  磁盘:    ${CYAN}${disk_mb}MB 可用${NC}"
-
-  if [ "${INSTALL_MODE}" = "prebuilt" ]; then
-    echo -e "  模式:    ${GREEN}预编译下载（推荐低配服务器）${NC}"
-  else
-    echo -e "  模式:    ${YELLOW}源码编译（需要更多资源）${NC}"
-  fi
-
   echo -e "  端口:    ${CYAN}${ACTUAL_PORT}${NC}"
   echo ""
 
-  # 预检
-  if [ "$disk_mb" -lt 300 ]; then
-    error "磁盘可用空间仅 ${disk_mb}MB，至少需要 300MB"
-    return 1
-  fi
+  if ! run_step "环境检查与残留清理" pre_install_cleanup; then show_failure_report; return 1; fi
 
-  if ! check_network "https://github.com" 10; then
-    error "无法连接 GitHub，请检查网络"
-    return 1
-  fi
-
-  # 自动解决端口冲突
   auto_resolve_port
 
-  # 执行安装步骤
-  if [ "${INSTALL_MODE}" = "prebuilt" ]; then
-    if ! run_step "安装 Node.js 运行时" install_node; then show_failure_report; return 1; fi
-    if ! run_step "下载预编译包 (${arch})" download_prebuilt; then show_failure_report; return 1; fi
-
-    # 如果预编译包不可用，自动切换到源码模式
-    if [ "${INSTALL_MODE}" = "source" ]; then
-      warn "自动切换到源码编译模式..."
-      separator
-      if ! run_step "安装编译依赖" install_build_deps; then show_failure_report; return 1; fi
-      if ! run_step "克隆代码并编译" clone_and_build; then show_failure_report; return 1; fi
-    fi
-  else
-    if ! run_step "安装编译依赖" install_build_deps; then show_failure_report; return 1; fi
-    if ! run_step "安装 Node.js" install_node; then show_failure_report; return 1; fi
-    if ! run_step "克隆代码并编译" clone_and_build; then show_failure_report; return 1; fi
-  fi
-
-  # 通用步骤
+  if ! run_step "安装 Node.js 运行时" install_node; then show_failure_report; return 1; fi
+  if ! run_step "下载预编译包 (${arch})" download_prebuilt; then show_failure_report; return 1; fi
   if ! run_step "创建隔离用户" create_user; then show_failure_report; return 1; fi
   if ! run_step "配置环境变量" configure_env; then show_failure_report; return 1; fi
 
@@ -1261,7 +1150,6 @@ do_install() {
   if ! run_step "安装服务并设置权限" _install_service_and_perms; then show_failure_report; return 1; fi
   if ! run_step "启动服务" start_service; then show_failure_report; return 1; fi
 
-  # 完成
   echo ""
   echo -e "${BOLD}${GREEN}╔══════════════════════════════════════════════╗${NC}"
   echo -e "${BOLD}${GREEN}║            部署完成！                        ║${NC}"
@@ -1269,7 +1157,6 @@ do_install() {
   echo ""
 
   local ip_addr; ip_addr=$(hostname -I 2>/dev/null | awk '{print $1}' || echo '服务器IP')
-  echo -e "  安装模式:  ${CYAN}${INSTALL_MODE}${NC}"
   echo -e "  访问地址:  ${CYAN}http://${ip_addr}:${ACTUAL_PORT}${NC}"
   echo -e "  管理令牌:  .env 中的 AUTH_TOKEN"
   echo ""
@@ -1296,9 +1183,6 @@ _install_service_and_perms() {
   write_marker
 }
 
-# ═══════════════════════════════════════════════════════════
-# 依赖修复
-# ═══════════════════════════════════════════════════════════
 do_repair() {
   COMPLETED_STEPS=()
   FAILED_STEPS=()
@@ -1336,11 +1220,6 @@ do_repair() {
 
   run_step "修复 Node.js" install_node || true
 
-  local install_mode; install_mode=$(grep '^install_mode=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2)
-  if [ "$install_mode" = "source" ] && [ -d "${APP_DIR}/.git" ]; then
-    run_step "重新构建" clone_and_build || true
-  fi
-
   if [ ! -f "${APP_DIR}/dist/server/index.js" ]; then
     run_step "下载预编译包" download_prebuilt || true
   fi
@@ -1360,9 +1239,6 @@ do_repair() {
   systemctl status "${SERVICE_NAME}" --no-pager 2>/dev/null || true
 }
 
-# ═══════════════════════════════════════════════════════════
-# 卸载（保留数据）
-# ═══════════════════════════════════════════════════════════
 do_uninstall() {
   echo ""
   echo -e "${BOLD}${YELLOW}  卸载（保留数据）${NC}"
@@ -1395,9 +1271,6 @@ do_uninstall() {
   echo -e "  配置: ${CYAN}${ENV_FILE}${NC}"
 }
 
-# ═══════════════════════════════════════════════════════════
-# 完整卸载
-# ═══════════════════════════════════════════════════════════
 do_uninstall_all() {
   echo ""
   echo -e "${BOLD}${RED}  完整卸载（不保留数据）${NC}"
@@ -1419,9 +1292,6 @@ do_uninstall_all() {
   success "完整卸载完成"
 }
 
-# ═══════════════════════════════════════════════════════════
-# 版本升级
-# ═══════════════════════════════════════════════════════════
 do_upgrade() {
   echo ""
   echo -e "${BOLD}${GREEN}╔══════════════════════════════════════════════╗${NC}"
@@ -1504,23 +1374,19 @@ do_upgrade() {
     return 1
   fi
 
-  # 备份配置和数据
   local env_backup="/tmp/metapi_env_upgrade_$$"
   local data_backup="/tmp/metapi_data_upgrade_$$"
   [ -f "${ENV_FILE}" ] && cp -a "${ENV_FILE}" "${env_backup}"
   [ -d "${DATA_DIR}" ] && cp -a "${DATA_DIR}" "${data_backup}"
 
-  # 停止服务并替换文件
   systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
   rm -rf "${APP_DIR:?}"/* "${APP_DIR}"/.[!.]* 2>/dev/null || true
   cp -a "${extracted_dir}/." "${APP_DIR}/"
 
-  # 恢复配置和数据
   [ -f "${env_backup}" ] && cp -a "${env_backup}" "${ENV_FILE}"
   [ -d "${data_backup}" ] && cp -a "${data_backup}/." "${DATA_DIR}/"
   rm -rf "${tmp_dir}" "${env_backup}" "${data_backup}"
 
-  # 更新标记、权限、重启
   write_marker
   chown -R "${APP_USER}:${APP_USER}" "${APP_DIR}" 2>/dev/null || true
   install_systemd_service
@@ -1536,9 +1402,6 @@ do_upgrade() {
   fi
 }
 
-# ═══════════════════════════════════════════════════════════
-# 查看运行日志
-# ═══════════════════════════════════════════════════════════
 view_service_logs() {
   echo ""
   echo -e "${BOLD}${CYAN}  ── 运行日志（最近 30 行） ──${NC}"
@@ -1551,9 +1414,6 @@ view_service_logs() {
   echo ""
 }
 
-# ═══════════════════════════════════════════════════════════
-# 入口
-# ═══════════════════════════════════════════════════════════
 main() {
   parse_args "$@"
   preflight_check
