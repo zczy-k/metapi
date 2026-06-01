@@ -73,16 +73,12 @@ separator() { echo -e "${CYAN}────────────────�
 # 终端清理（退出/中断时调用）
 # ═══════════════════════════════════════════════════════════
 cleanup_terminal() {
-  printf '\033[?25h'          # 显示光标
   printf '\033[0m'            # 重置属性
   stty echo 2>/dev/null      # 确保回显开启
-  [ -t 0 ] && tput rmcup 2>/dev/null  # 恢复前屏幕内容（可选）
-  clear 2>/dev/null
 }
 
 # SIGINT 捕获：防止 Ctrl+C 弄乱终端
 trap_cleanup() {
-  printf '\033[?25h'
   printf '\033[0m'
   stty echo 2>/dev/null
   echo -e "\n  ${YELLOW}操作已取消，返回菜单...${NC}"
@@ -741,17 +737,6 @@ show_interactive_menu() {
   # 当前菜单页：main / install
   local menu_page="main"
 
-  # 按回车继续（带 trap 保护，Ctrl+C 不弄乱终端）
-  # 用法: wait_return; choice 变量会被设为 "ctrlc" 如果是 Ctrl+C 触发的
-  wait_return() {
-    local r
-    deregister_trap
-    read -r r
-    register_trap
-  }
-
-  clear
-
   while true; do
     # 动态刷新安装状态和服务状态
     local is_installed="no"
@@ -768,8 +753,7 @@ show_interactive_menu() {
       fi
     fi
 
-    # 隐藏光标 → 移到顶部重绘
-    printf '\033[?25l\033[H'
+    clear
 
     echo ""
     echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════╗${NC}"
@@ -808,8 +792,6 @@ show_interactive_menu() {
       echo ""
       echo -e "  ${CYAN}──────────────────────────────────${NC}"
       echo -e "  ${BOLD}${YELLOW}[q] 退出${NC}"
-
-      printf '\033[J\033[?25h'
       echo ""
       read -rp "  请选择 [1-7, q]: " choice
 
@@ -830,24 +812,23 @@ show_interactive_menu() {
           menu_page="install"
           ;;
         2)
-          printf '\033[?25h'
           deregister_trap
           show_status_info
           echo ""
           echo -e "  ${DIM}按回车返回菜单...${NC}"
-          wait_return
+          read -r
+          register_trap
           ;;
         3)
-          printf '\033[?25h'
           deregister_trap
           do_repair
           echo ""
           echo -e "  ${DIM}按回车返回菜单...${NC}"
-          wait_return
+          read -r
+          register_trap
           ;;
         4)
           if [ "$is_installed" = "yes" ]; then
-            printf '\033[?25h'
             deregister_trap
             if [ "$svc_status" = "运行中" ]; then
               echo -e "  ${YELLOW}重启服务中...${NC}"
@@ -868,12 +849,12 @@ show_interactive_menu() {
             fi
             echo ""
             echo -e "  ${DIM}按回车返回菜单...${NC}"
-            wait_return
+            read -r
+            register_trap
           fi
           ;;
         5)
           if [ "$is_installed" = "yes" ] && [ "$svc_status" = "运行中" ]; then
-            printf '\033[?25h'
             deregister_trap
             echo -e "  ${YELLOW}停止服务中...${NC}"
             systemctl stop "${SERVICE_NAME}" 2>/dev/null
@@ -884,12 +865,12 @@ show_interactive_menu() {
             fi
             echo ""
             echo -e "  ${DIM}按回车返回菜单...${NC}"
-            wait_return
+            read -r
+            register_trap
           fi
           ;;
         6)
           if [ "$is_installed" = "yes" ]; then
-            printf '\033[?25h'
             deregister_trap
             echo ""
             echo -e "  ${YELLOW}确认卸载（保留数据）？[y/N]${NC}"
@@ -898,13 +879,13 @@ show_interactive_menu() {
               do_uninstall
               echo ""
               echo -e "  ${DIM}按回车返回菜单...${NC}"
-              wait_return
+              read -r
             fi
+            register_trap
           fi
           ;;
         7)
           if [ "$is_installed" = "yes" ]; then
-            printf '\033[?25h'
             deregister_trap
             echo ""
             echo -e "  ${RED}⚠ 完整卸载将删除所有数据！确认？[y/N]${NC}"
@@ -913,8 +894,9 @@ show_interactive_menu() {
               do_uninstall_all
               echo ""
               echo -e "  ${DIM}按回车返回菜单...${NC}"
-              wait_return
+              read -r
             fi
+            register_trap
           fi
           ;;
         q|Q)
@@ -959,8 +941,6 @@ show_interactive_menu() {
       else
         echo -e "  ${DIM}[0] 开始安装（请先设置令牌）${NC}    ${YELLOW}[b] 返回${NC}    ${YELLOW}[q] 退出${NC}"
       fi
-
-      printf '\033[J\033[?25h'
       echo ""
       read -rp "  请选择 [0-4, b, q]: " choice
 
@@ -1018,7 +998,6 @@ show_interactive_menu() {
           CLI_AUTH_TOKEN="$menu_auth_token"
           CLI_PROXY_TOKEN="$menu_proxy_token"
           deregister_trap
-          printf '\033[?25h'
           return 0
           ;;
         b|B)
