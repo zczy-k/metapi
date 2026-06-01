@@ -79,8 +79,7 @@ cleanup_terminal() {
 
 # SIGINT 捕获：防止 Ctrl+C 弄乱终端
 trap_cleanup() {
-  printf '\033[0m'
-  stty echo 2>/dev/null
+  cleanup_terminal
   echo -e "\n  ${YELLOW}操作已取消，返回菜单...${NC}"
 }
 
@@ -709,7 +708,6 @@ show_firewall_hint() {
 
   echo -e "  ${YELLOW}⚠ 云服务器需在安全组中放行 ${ACTUAL_PORT}/TCP${NC}"
 
-  sleep 2
   if curl -sf --connect-timeout 3 "http://127.0.0.1:${ACTUAL_PORT}" >/dev/null 2>&1; then
     success "端口 ${ACTUAL_PORT} 本地可达 ✓"
   else
@@ -1005,6 +1003,12 @@ show_interactive_menu() {
         b|B)
           menu_page="main"
           ;;
+        q|Q)
+          deregister_trap
+          cleanup_terminal
+          echo -e "  ${YELLOW}已退出${NC}"
+          exit 0
+          ;;
         *)
           echo -e "  ${RED}无效选择，请重新输入${NC}"
           read -rp "  按回车键继续" _
@@ -1226,9 +1230,15 @@ do_repair() {
     run_step "重新构建" clone_and_build || true
   fi
 
-  [ ! -f "${APP_DIR}/dist/server/index.js" ] && run_step "下载预编译包" download_prebuilt || true
-  [ ! -f "${ENV_FILE}" ] && run_step "配置环境变量" configure_env || true
-  [ ! -f "${SERVICE_FILE}" ] && run_step "安装服务" install_systemd_service || true
+  if [ ! -f "${APP_DIR}/dist/server/index.js" ]; then
+    run_step "下载预编译包" download_prebuilt || true
+  fi
+  if [ ! -f "${ENV_FILE}" ]; then
+    run_step "配置环境变量" configure_env || true
+  fi
+  if [ ! -f "${SERVICE_FILE}" ]; then
+    run_step "安装服务" install_systemd_service || true
+  fi
 
   set_permissions
 
