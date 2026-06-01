@@ -327,14 +327,10 @@ configure_nginx_proxy() {
 
   {
     echo "server {"
+    echo "    listen ${listen_port};"
     if [ -n "$domain" ]; then
-      echo "    listen 80;"
       echo "    server_name ${domain};"
-      if [ "$listen_port" != "80" ]; then
-        echo "    listen ${listen_port};"
-      fi
     else
-      echo "    listen ${listen_port};"
       echo "    server_name _;"
     fi
     echo ""
@@ -363,27 +359,112 @@ configure_nginx_proxy() {
   fi
 }
 
-setup_ssl_cert() {
-  local domain="$1" email="$2"
+setup_nginx_ssl() {
+  local domain="$1" ssl_port="$2" upstream_port="$3" email="$4"
+  local challenge_dir="/var/www/metapi-challenge"
 
-  if [ ! -d "${NGINX_SSL_DIR}/${domain}" ]; then
-    if ! command -v certbot &>/dev/null; then
-      info "安装 certbot..."
-      apt-get install -y -qq certbot python3-certbot-nginx 2>&1 || { error "certbot 安装失败"; return 1; }
-    fi
+  info "配置 SSL 证书..."
 
-    info "申请 Let's Encrypt 证书..."
-    local certbot_args="-n --nginx -d ${domain}"
-    [ -n "$email" ] && certbot_args="$certbot_args -m ${email}" || certbot_args="$certbot_args --register-unsafely-without-email"
-
-    if certbot $certbot_args --agree-tos --redirect 2>&1; then
-      success "SSL 证书申请成功"
-    else
-      warn "certbot 自动配置失败，尝试手动..."
-      certbot certonly --nginx -d "${domain}" 2>&1 || { warn "证书申请暂时失败，可稍后手动执行: certbot --nginx -d ${domain}"; return 1; }
-    fi
-  else
+  if [ -d "${NGINX_SSL_DIR}/${domain}" ]; then
     info "SSL 证书已存在: ${NGINX_SSL_DIR}/${domain}"
+    return 0
+  fi
+
+  mkdir -p "$challenge_dir"
+
+  {
+    echo "server {"
+    echo "    listen 80;"
+    echo "    server_name ${domain};"
+    echo ""
+    echo "    location /.well-known/acme-challenge/ {"
+    echo "        root ${challenge_dir};"
+    echo "    }"
+    echo ""
+    echo "    location / {"
+    echo "        proxy_pass http://127.0.0.1:${upstream_port};"
+    echo "        proxy_set_header Host \$host;"
+    echo "        proxy_set_header X-Real-IP \$remote_addr;"
+    echo "        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;"
+    echo "        proxy_set_header X-Forwarded-Proto \$scheme;"
+    echo "        proxy_read_timeout 300s;"
+    echo "        proxy_buffering off;"
+    echo "        proxy_cache off;"
+    echo "    }"
+    echo "}"
+  } > "${NGINX_METAPI_CONF}"
+
+  ln -sf "${NGINX_METAPI_CONF}" "${NGINX_METAPI_ENABLED}"
+
+  if ! nginx -t 2>/dev/null; then
+    error "Nginx 配置测试失败"
+    nginx -t 2>&1
+    return 1
+  fi
+  reload_nginx
+
+  if ! command -v certbot &>/dev/null; then
+    info "安装 certbot..."
+    apt-get install -y -qq certbot 2>&1 || { error "certbot 安装失败"; return 1; }
+  fi
+
+  info "申请 Let's Encrypt 证书..."
+  local certbot_args="certonly --webroot -w ${challenge_dir} -d ${domain} --non-interactive --agree-tos"
+  [ -n "$email" ] && certbot_args="$certbot_args -m ${email}" || certbot_args="$certbot_args --register-unsafely-without-email"
+
+  if ! certbot $certbot_args 2>&1; then
+    warn "证书申请失败，可稍后手动执行: certbot certonly --webroot -w ${challenge_dir} -d ${domain}"
+    return 1
+  fi
+
+  success "SSL 证书申请成功"
+
+  local ssl_cert="/etc/letsencrypt/live/${domain}/fullchain.pem"
+  local ssl_key="/etc/letsencrypt/live/${domain}/privkey.pem"
+
+  if [ ! -f "$ssl_cert" ]; then
+    error "证书文件未找到: ${ssl_cert}"
+    return 1
+  fi
+
+  info "写入 Nginx SSL 配置（端口 ${ssl_port}）..."
+
+  {
+    echo "server {"
+    echo "    listen 80;"
+    echo "    server_name ${domain};"
+    echo "    return 301 https://\$host:${ssl_port}\$request_uri;"
+    echo "}"
+    echo ""
+    echo "server {"
+    echo "    listen ${ssl_port} ssl http2;"
+    echo "    server_name ${domain};"
+    echo ""
+    echo "    ssl_certificate ${ssl_cert};"
+    echo "    ssl_certificate_key ${ssl_key};"
+    echo ""
+    echo "    location / {"
+    echo "        proxy_pass http://127.0.0.1:${upstream_port};"
+    echo "        proxy_set_header Host \$host;"
+    echo "        proxy_set_header X-Real-IP \$remote_addr;"
+    echo "        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;"
+    echo "        proxy_set_header X-Forwarded-Proto \$scheme;"
+    echo "        proxy_read_timeout 300s;"
+    echo "        proxy_buffering off;"
+    echo "        proxy_cache off;"
+    echo "    }"
+    echo "}"
+  } > "${NGINX_METAPI_CONF}"
+
+  ln -sf "${NGINX_METAPI_CONF}" "${NGINX_METAPI_ENABLED}"
+
+  if nginx -t 2>/dev/null; then
+    reload_nginx
+    success "SSL 配置完成，可通过 ${CYAN}https://${domain}:${ssl_port}${NC} 访问"
+  else
+    error "Nginx SSL 配置测试失败"
+    nginx -t 2>&1
+    return 1
   fi
 }
 
@@ -1303,12 +1384,10 @@ do_install() {
   if ! run_step "安装服务并设置权限" _install_service_and_perms; then show_failure_report; return 1; fi
   if ! run_step "启动服务" start_service; then show_failure_report; return 1; fi
 
-  if [ -n "$DOMAIN_NAME" ] || [ -n "$DOMAIN_LISTEN_PORT" ]; then
-    run_step "配置 Nginx 反向代理" _setup_nginx_proxy || true
-  fi
-
   if [ -n "$DOMAIN_NAME" ] && [ -n "$CERTBOT_EMAIL" ]; then
-    run_step "申请 SSL 证书" _setup_ssl_cert || true
+    run_step "配置 Nginx + SSL 证书" _setup_nginx_ssl || true
+  elif [ -n "$DOMAIN_NAME" ] || [ -n "$DOMAIN_LISTEN_PORT" ]; then
+    run_step "配置 Nginx 反向代理" _setup_nginx_proxy || true
   fi
 
   write_marker
@@ -1322,7 +1401,7 @@ do_install() {
   local ip_addr; ip_addr=$(hostname -I 2>/dev/null | awk '{print $1}' || echo '服务器IP')
   if [ -n "$DOMAIN_NAME" ]; then
     if [ -n "$CERTBOT_EMAIL" ]; then
-      echo -e "  访问地址:  ${CYAN}https://${DOMAIN_NAME}${NC}"
+      echo -e "  访问地址:  ${CYAN}https://${DOMAIN_NAME}:${DOMAIN_LISTEN_PORT}${NC}"
     else
       echo -e "  访问地址:  ${CYAN}http://${DOMAIN_NAME}:${DOMAIN_LISTEN_PORT}${NC}"
     fi
@@ -1355,15 +1434,12 @@ _install_service_and_perms() {
 
 _setup_nginx_proxy() {
   install_nginx || return 1
-  if [ -n "$CERTBOT_EMAIL" ]; then
-    configure_nginx_proxy "${DOMAIN_NAME}" "80" "${ACTUAL_PORT}"
-  else
-    configure_nginx_proxy "${DOMAIN_NAME}" "${DOMAIN_LISTEN_PORT}" "${ACTUAL_PORT}"
-  fi
+  configure_nginx_proxy "${DOMAIN_NAME}" "${DOMAIN_LISTEN_PORT}" "${ACTUAL_PORT}"
 }
 
-_setup_ssl_cert() {
-  setup_ssl_cert "${DOMAIN_NAME}" "${CERTBOT_EMAIL}"
+_setup_nginx_ssl() {
+  install_nginx || return 1
+  setup_nginx_ssl "${DOMAIN_NAME}" "${DOMAIN_LISTEN_PORT}" "${ACTUAL_PORT}" "${CERTBOT_EMAIL}"
 }
 
 _configure_ssl_domain_interactive() {
@@ -1422,25 +1498,22 @@ _configure_ssl_domain_interactive() {
 
   ACTUAL_PORT="$(grep '^PORT=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2 || echo "${DEFAULT_PORT}")"
 
-  info "安装/配置 Nginx..."
-  install_nginx
   if [ -n "$CERTBOT_EMAIL" ]; then
-    configure_nginx_proxy "${DOMAIN_NAME}" "80" "${ACTUAL_PORT}"
+    info "安装/配置 Nginx + SSL..."
+    install_nginx
+    setup_nginx_ssl "${DOMAIN_NAME}" "${DOMAIN_LISTEN_PORT}" "${ACTUAL_PORT}" "${CERTBOT_EMAIL}"
   else
+    info "安装/配置 Nginx..."
+    install_nginx
     configure_nginx_proxy "${DOMAIN_NAME}" "${DOMAIN_LISTEN_PORT}" "${ACTUAL_PORT}"
-  fi
-
-  if [ -n "$CERTBOT_EMAIL" ]; then
-    info "申请 SSL 证书..."
-    setup_ssl_cert "${DOMAIN_NAME}" "${CERTBOT_EMAIL}"
   fi
 
   write_marker
 
   echo ""
-  if [ -d "${NGINX_SSL_DIR}/${DOMAIN_NAME}" ]; then
-    success "SSL 配置完成，访问: ${CYAN}https://${DOMAIN_NAME}${NC}"
-  else
+  if [ -n "$CERTBOT_EMAIL" ] && [ -d "${NGINX_SSL_DIR}/${DOMAIN_NAME}" ]; then
+    success "SSL 配置完成，访问: ${CYAN}https://${DOMAIN_NAME}:${DOMAIN_LISTEN_PORT}${NC}"
+  elif [ -n "$DOMAIN_NAME" ]; then
     success "Nginx 配置完成，访问: ${CYAN}http://${DOMAIN_NAME}:${DOMAIN_LISTEN_PORT}${NC}"
   fi
 
