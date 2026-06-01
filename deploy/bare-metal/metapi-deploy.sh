@@ -780,6 +780,8 @@ show_interactive_menu() {
         fi
         echo -e "  ${GREEN}6)${NC} 卸载（保留数据）"
         echo -e "  ${GREEN}7)${NC} 完整卸载（删除数据）"
+        echo -e "  ${GREEN}8)${NC} 升级到最新版本"
+        echo -e "  ${GREEN}9)${NC} 查看运行日志"
       else
         echo -e "  ${DIM}4) 启动服务（未安装）${NC}"
         echo -e "  ${DIM}5) 停止服务（未安装）${NC}"
@@ -789,7 +791,8 @@ show_interactive_menu() {
       echo ""
       echo -e "  ${CYAN}0)${NC} 退出"
       echo ""
-      read -rp "  请输入数字 [0-7]: " choice
+      local max_opt=7; [ "$is_installed" = "yes" ] && max_opt=9
+      read -rp "  请输入数字 [0-${max_opt}]: " choice
       echo ""
 
       case "$choice" in
@@ -886,6 +889,24 @@ show_interactive_menu() {
               echo ""
               read -rp "  按回车键返回菜单" _
             fi
+            register_trap
+          fi
+          ;;
+        8)
+          if [ "$is_installed" = "yes" ]; then
+            deregister_trap
+            do_upgrade
+            echo ""
+            read -rp "  按回车键返回菜单" _
+            register_trap
+          fi
+          ;;
+        9)
+          if [ "$is_installed" = "yes" ]; then
+            deregister_trap
+            view_service_logs
+            echo ""
+            read -rp "  按回车键返回菜单" _
             register_trap
           fi
           ;;
@@ -1306,6 +1327,128 @@ do_uninstall_all() {
 
   echo ""
   success "完整卸载完成"
+}
+
+# ═══════════════════════════════════════════════════════════
+# 版本升级
+# ═══════════════════════════════════════════════════════════
+do_upgrade() {
+  echo ""
+  echo -e "${BOLD}${GREEN}╔══════════════════════════════════════════════╗${NC}"
+  echo -e "${BOLD}${GREEN}║       Metapi 版本升级                         ║${NC}"
+  echo -e "${BOLD}${GREEN}╚══════════════════════════════════════════════╝${NC}"
+  echo ""
+
+  if [ ! -f "${MARKER_FILE}" ]; then
+    error "未检测到安装记录"
+    return 1
+  fi
+
+  local arch; arch=$(detect_arch)
+  if [ "$arch" = "unknown" ]; then
+    error "无法识别系统架构 ($(uname -m))"
+    return 1
+  fi
+
+  info "检查最新版本..."
+  local release_info; release_info=$(get_latest_release)
+  if [ -z "$release_info" ]; then
+    error "无法获取最新版本信息（网络或 API 错误）"
+    return 1
+  fi
+
+  local latest_version; latest_version=$(get_release_version "$release_info")
+  if [ -z "$latest_version" ]; then
+    error "无法解析最新版本号"
+    return 1
+  fi
+  info "最新版本: ${latest_version}"
+
+  local download_url; download_url=$(get_release_asset_url "$release_info" "$arch")
+  if [ -z "$download_url" ]; then
+    error "未找到 ${arch} 架构的预编译包"
+    return 1
+  fi
+
+  echo ""
+  echo -e "  ${YELLOW}版本: ${latest_version} | 架构: ${arch}${NC}"
+  read -rp "  确认升级？[y/N]: " confirm
+  echo ""
+  [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && { info "已取消"; return 0; }
+
+  info "下载 ${latest_version}..."
+  local tmp_dir; tmp_dir=$(mktemp -d)
+  local filename; filename=$(basename "$download_url")
+  local tmp_file="${tmp_dir}/${filename}"
+
+  if ! curl -fSL --connect-timeout 30 --max-time 600 --progress-bar -o "$tmp_file" "$download_url" 2>&1; then
+    error "下载失败"
+    rm -rf "${tmp_dir}"
+    return 1
+  fi
+
+  info "解压..."
+  if ! tar -xzf "$tmp_file" -C "$tmp_dir" 2>&1; then
+    error "解压失败"
+    rm -rf "${tmp_dir}"
+    return 1
+  fi
+
+  local extracted_dir
+  extracted_dir=$(find "$tmp_dir" -maxdepth 1 -type d -name "metapi-*" | head -1)
+  [ -z "$extracted_dir" ] && extracted_dir=$(find "$tmp_dir" -maxdepth 1 -type d | tail -1)
+
+  if [ -z "$extracted_dir" ] || [ ! -d "${extracted_dir}/dist" ]; then
+    error "预编译包结构异常"
+    rm -rf "${tmp_dir}"
+    return 1
+  fi
+
+  # 备份配置和数据
+  local env_backup="/tmp/metapi_env_upgrade_$$"
+  local data_backup="/tmp/metapi_data_upgrade_$$"
+  [ -f "${ENV_FILE}" ] && cp -a "${ENV_FILE}" "${env_backup}"
+  [ -d "${DATA_DIR}" ] && cp -a "${DATA_DIR}" "${data_backup}"
+
+  # 停止服务并替换文件
+  systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
+  rm -rf "${APP_DIR:?}"/* "${APP_DIR}"/.[!.]* 2>/dev/null || true
+  cp -a "${extracted_dir}/." "${APP_DIR}/"
+
+  # 恢复配置和数据
+  [ -f "${env_backup}" ] && cp -a "${env_backup}" "${ENV_FILE}"
+  [ -d "${data_backup}" ] && cp -a "${data_backup}/." "${DATA_DIR}/"
+  rm -rf "${tmp_dir}" "${env_backup}" "${data_backup}"
+
+  # 更新标记、权限、重启
+  write_marker
+  chown -R "${APP_USER}:${APP_USER}" "${APP_DIR}" 2>/dev/null || true
+  systemctl daemon-reload
+  systemctl start "${SERVICE_NAME}"
+
+  if systemctl is-active --quiet "${SERVICE_NAME}"; then
+    success "升级完成，${SERVICE_NAME} ${latest_version} 已启动"
+    return 0
+  else
+    error "升级完成，但服务启动失败"
+    journalctl -u "${SERVICE_NAME}" -n 15 --no-pager 2>/dev/null
+    return 1
+  fi
+}
+
+# ═══════════════════════════════════════════════════════════
+# 查看运行日志
+# ═══════════════════════════════════════════════════════════
+view_service_logs() {
+  echo ""
+  echo -e "${BOLD}${CYAN}  ── 运行日志（最近 30 行） ──${NC}"
+  echo ""
+  if [ ! -f "${SERVICE_FILE}" ]; then
+    echo -e "  ${YELLOW}服务尚未安装${NC}"
+    return 0
+  fi
+  journalctl -u "${SERVICE_NAME}" -n 30 --no-pager 2>/dev/null || echo "  （无日志）"
+  echo ""
 }
 
 # ═══════════════════════════════════════════════════════════
