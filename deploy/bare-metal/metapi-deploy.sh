@@ -756,49 +756,47 @@ show_interactive_menu() {
     clear
 
     echo ""
-    echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}${CYAN}║          ${BOLD}${GREEN}Metapi 管理面板${NC}${BOLD}${CYAN}                        ║${NC}"
-    echo -e "${BOLD}${CYAN}╚══════════════════════════════════════════════╝${NC}"
-    echo -e "  ${DIM}${os} / ${arch}  内存 ${mem_mb}MB  磁盘 ${disk_mb}MB 可用${NC}"
+    echo -e "${BOLD}${CYAN}╔════════════════════════════════════╗${NC}"
+    echo -e "${BOLD}${CYAN}║        Metapi 管理面板              ║${NC}"
+    echo -e "${BOLD}${CYAN}╚════════════════════════════════════╝${NC}"
+    echo -e "  ${DIM}${os} / ${arch} | 内存 ${mem_mb}MB | 磁盘 ${disk_mb}MB 可用${NC}"
     echo -e "  ${DIM}服务状态: $( [ "$svc_status" = "运行中" ] && echo "${GREEN}${svc_status}${NC}" || [ "$svc_status" = "已停止" ] && echo "${YELLOW}${svc_status}${NC}" || echo "${RED}${svc_status}${NC}" )${NC}"
     echo ""
 
     if [ "$menu_page" = "main" ]; then
       # ─── 主菜单 ───
-      echo -e "  ${CYAN}──────────────────────────────────${NC}"
       if [ "$is_installed" = "yes" ]; then
-        echo -e "  ${GREEN}[1]${NC} 重新安装 / 修改配置"
+        echo -e "  ${GREEN}1)${NC} 重新安装 / 修改配置"
       else
-        echo -e "  ${GREEN}[1]${NC} 安装部署"
+        echo -e "  ${GREEN}1)${NC} 安装部署"
       fi
-      echo -e "  ${GREEN}[2]${NC} 查看状态"
-      echo -e "  ${GREEN}[3]${NC} 修复依赖"
+      echo -e "  ${GREEN}2)${NC} 查看状态"
+      echo -e "  ${GREEN}3)${NC} 修复依赖"
       if [ "$is_installed" = "yes" ]; then
         if [ "$svc_status" = "运行中" ]; then
-          echo -e "  ${GREEN}[4]${NC} 重启服务"
-          echo -e "  ${GREEN}[5]${NC} 停止服务"
+          echo -e "  ${GREEN}4)${NC} 重启服务"
+          echo -e "  ${GREEN}5)${NC} 停止服务"
         else
-          echo -e "  ${GREEN}[4]${NC} 启动服务"
-          echo -e "  ${DIM}[5] 停止服务（已停止）${NC}"
+          echo -e "  ${GREEN}4)${NC} 启动服务"
+          echo -e "  ${GREEN}5)${NC} 停止服务  ${DIM}(服务已停止)${NC}"
         fi
-        echo -e "  ${GREEN}[6]${NC} 卸载（保留数据）"
-        echo -e "  ${GREEN}[7]${NC} 完整卸载（删除数据）"
+        echo -e "  ${GREEN}6)${NC} 卸载（保留数据）"
+        echo -e "  ${GREEN}7)${NC} 完整卸载（删除数据）"
       else
-        echo -e "  ${DIM}[4] 启动服务（未安装）${NC}"
-        echo -e "  ${DIM}[5] 停止服务（未安装）${NC}"
-        echo -e "  ${DIM}[6] 卸载（未安装）${NC}"
-        echo -e "  ${DIM}[7] 完整卸载（未安装）${NC}"
+        echo -e "  ${DIM}4) 启动服务（未安装）${NC}"
+        echo -e "  ${DIM}5) 停止服务（未安装）${NC}"
+        echo -e "  ${DIM}6) 卸载（未安装）${NC}"
+        echo -e "  ${DIM}7) 完整卸载（未安装）${NC}"
       fi
       echo ""
-      echo -e "  ${CYAN}──────────────────────────────────${NC}"
-      echo -e "  ${BOLD}${YELLOW}[q] 退出${NC}"
+      echo -e "  ${CYAN}0)${NC} 退出"
       echo ""
-      read -rp "  请选择 [1-7, q]: " choice
+      read -rp "  请输入数字 [0-7]: " choice
+      echo ""
 
       case "$choice" in
         1)
           # 进入安装配置子菜单
-          # 如果已安装，预填当前 .env 中的配置
           if [ "$is_installed" = "yes" ] && [ -f "${ENV_FILE}" ]; then
             local env_port; env_port=$(grep '^PORT=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2)
             [ -n "$env_port" ] && menu_port="$env_port"
@@ -815,71 +813,66 @@ show_interactive_menu() {
           deregister_trap
           show_status_info
           echo ""
-          echo -e "  ${DIM}按回车返回菜单...${NC}"
-          read -r
+          read -rp "  按回车键返回菜单" _
           register_trap
           ;;
         3)
           deregister_trap
           do_repair
           echo ""
-          echo -e "  ${DIM}按回车返回菜单...${NC}"
-          read -r
+          read -rp "  按回车键返回菜单" _
           register_trap
           ;;
         4)
           if [ "$is_installed" = "yes" ]; then
             deregister_trap
             if [ "$svc_status" = "运行中" ]; then
-              echo -e "  ${YELLOW}重启服务中...${NC}"
+              echo -e "  ${YELLOW}正在重启服务...${NC}"
               systemctl restart "${SERVICE_NAME}" 2>/dev/null
               if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
                 echo -e "  ${GREEN}服务已重启${NC}"
               else
-                echo -e "  ${RED}服务重启失败${NC}"
+                echo -e "  ${RED}服务重启失败！${NC}"
               fi
             else
-              echo -e "  ${YELLOW}启动服务中...${NC}"
+              echo -e "  ${YELLOW}正在启动服务...${NC}"
               systemctl start "${SERVICE_NAME}" 2>/dev/null
               if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
                 echo -e "  ${GREEN}服务已启动${NC}"
               else
-                echo -e "  ${RED}服务启动失败${NC}"
+                echo -e "  ${RED}服务启动失败！${NC}"
               fi
             fi
             echo ""
-            echo -e "  ${DIM}按回车返回菜单...${NC}"
-            read -r
+            read -rp "  按回车键返回菜单" _
             register_trap
           fi
           ;;
         5)
           if [ "$is_installed" = "yes" ] && [ "$svc_status" = "运行中" ]; then
             deregister_trap
-            echo -e "  ${YELLOW}停止服务中...${NC}"
+            echo -e "  ${YELLOW}正在停止服务...${NC}"
             systemctl stop "${SERVICE_NAME}" 2>/dev/null
             if ! systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
               echo -e "  ${GREEN}服务已停止${NC}"
             else
-              echo -e "  ${RED}服务停止失败${NC}"
+              echo -e "  ${RED}服务停止失败！${NC}"
             fi
             echo ""
-            echo -e "  ${DIM}按回车返回菜单...${NC}"
-            read -r
+            read -rp "  按回车键返回菜单" _
             register_trap
           fi
           ;;
         6)
           if [ "$is_installed" = "yes" ]; then
             deregister_trap
+            echo -e "  ${YELLOW}卸载将保留 /opt/metapi/data 目录下的数据${NC}"
+            read -rp "  确认卸载？[y/N]: " confirm
             echo ""
-            echo -e "  ${YELLOW}确认卸载（保留数据）？[y/N]${NC}"
-            read -rp "  " confirm
             if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
               do_uninstall
               echo ""
-              echo -e "  ${DIM}按回车返回菜单...${NC}"
-              read -r
+              read -rp "  按回车键返回菜单" _
             fi
             register_trap
           fi
@@ -887,47 +880,56 @@ show_interactive_menu() {
         7)
           if [ "$is_installed" = "yes" ]; then
             deregister_trap
+            echo -e "  ${RED}⚠ 完整卸载将删除所有数据，不可恢复！${NC}"
+            read -rp "  确认完整卸载？[y/N]: " confirm
             echo ""
-            echo -e "  ${RED}⚠ 完整卸载将删除所有数据！确认？[y/N]${NC}"
-            read -rp "  " confirm
             if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
               do_uninstall_all
               echo ""
-              echo -e "  ${DIM}按回车返回菜单...${NC}"
-              read -r
+              read -rp "  按回车键返回菜单" _
             fi
             register_trap
           fi
           ;;
-        q|Q)
+        0|q|Q)
           deregister_trap
           cleanup_terminal
           echo -e "  ${YELLOW}已退出${NC}"
           exit 0
           ;;
+        *)
+          echo -e "  ${RED}无效选择，请重新输入${NC}"
+          read -rp "  按回车键继续" _
+          ;;
       esac
 
     elif [ "$menu_page" = "install" ]; then
       # ─── 安装配置子菜单 ───
-      echo -e "  ${CYAN}──────────────────────────────────${NC}"
-      echo -e "  ${DIM}安装配置${NC}"
-      echo -e "  ${GREEN}[1]${NC} 安装模式    $( [ "$menu_install_mode" = "prebuilt" ] && echo "${GREEN}预编译下载（推荐）${NC}" || echo "${YELLOW}源码编译${NC}" )"
-      echo -e "  ${GREEN}[2]${NC} 访问端口    $( port_in_use "$menu_port" && echo "${RED}${menu_port}（已占用）${NC}" || echo "${BOLD}${menu_port}${NC}" )"
+      echo -e "  ${CYAN}安装配置${NC}"
+      echo ""
+
+      local mode_label="预编译下载（推荐）"
+      [ "$menu_install_mode" = "source" ] && mode_label="源码编译"
+      echo -e "  ${GREEN}1)${NC} 安装模式:  ${BOLD}${mode_label}${NC}"
+
+      local port_info="${menu_port}"
+      port_in_use "$menu_port" && port_info="${menu_port} ${RED}(端口已占用)${NC}"
+      echo -e "  ${GREEN}2)${NC} 访问端口:  ${BOLD}${port_info}${NC}"
 
       if [ -n "$menu_auth_token" ]; then
-        local masked_token="${menu_auth_token:0:4}****${menu_auth_token: -4}"
-        [ ${#menu_auth_token} -le 8 ] && masked_token="****"
-        echo -e "  ${GREEN}[3]${NC} 管理令牌    ${BOLD}${masked_token}${NC}"
+        local masked_auth="${menu_auth_token:0:4}****${menu_auth_token: -4}"
+        [ ${#menu_auth_token} -le 8 ] && masked_auth="****"
+        echo -e "  ${GREEN}3)${NC} 管理令牌:  ${BOLD}${masked_auth}${NC}"
       else
-        echo -e "  ${GREEN}[3]${NC} 管理令牌    ${RED}（未设置，必填）${NC}"
+        echo -e "  ${GREEN}3)${NC} 管理令牌:  ${RED}（未设置，必填）${NC}"
       fi
 
       if [ -n "$menu_proxy_token" ]; then
         local masked_proxy="${menu_proxy_token:0:4}****${menu_proxy_token: -4}"
         [ ${#menu_proxy_token} -le 8 ] && masked_proxy="****"
-        echo -e "  ${GREEN}[4]${NC} 代理令牌    ${BOLD}${masked_proxy}${NC}"
+        echo -e "  ${GREEN}4)${NC} 代理令牌:  ${BOLD}${masked_proxy}${NC}"
       else
-        echo -e "  ${GREEN}[4]${NC} 代理令牌    ${RED}（未设置，必填）${NC}"
+        echo -e "  ${GREEN}4)${NC} 代理令牌:  ${RED}（未设置，必填）${NC}"
       fi
 
       local can_start="yes"
@@ -935,14 +937,11 @@ show_interactive_menu() {
       [ -z "$menu_proxy_token" ] && can_start="no"
 
       echo ""
-      echo -e "  ${CYAN}──────────────────────────────────${NC}"
-      if [ "$can_start" = "yes" ]; then
-        echo -e "  ${BOLD}${GREEN}[0] 开始安装${NC}    ${BOLD}${YELLOW}[b] 返回${NC}    ${YELLOW}[q] 退出${NC}"
-      else
-        echo -e "  ${DIM}[0] 开始安装（请先设置令牌）${NC}    ${YELLOW}[b] 返回${NC}    ${YELLOW}[q] 退出${NC}"
-      fi
+      echo -e "  ${CYAN}0)${NC} 开始安装"
+      echo -e "  ${CYAN}b)${NC} 返回主菜单"
       echo ""
-      read -rp "  请选择 [0-4, b, q]: " choice
+      read -rp "  请输入 [0-4, b]: " choice
+      echo ""
 
       case "$choice" in
         1)
@@ -954,14 +953,15 @@ show_interactive_menu() {
           ;;
         2)
           deregister_trap
-          read -rp "  请输入端口号 (1-65535): " new_port
+          read -rp "  请输入端口号 [1-65535]: " new_port
           register_trap
           if [[ "$new_port" =~ ^[0-9]+$ ]] && [ "$new_port" -ge 1 ] && [ "$new_port" -le 65535 ]; then
             menu_port="$new_port"
+            echo -e "  ${GREEN}端口已更新为 ${menu_port}${NC}"
           else
-            echo -e "  ${RED}无效端口号，按回车继续...${NC}"
-            deregister_trap; read -r; register_trap
+            echo -e "  ${RED}无效端口号${NC}"
           fi
+          read -rp "  按回车键继续" _
           ;;
         3)
           echo -e "  ${YELLOW}管理令牌 = 管理后台登录密码${NC}"
@@ -970,10 +970,11 @@ show_interactive_menu() {
           register_trap
           if [ -n "$new_token" ] && [ "$new_token" != "change-me-admin-token" ]; then
             menu_auth_token="$new_token"
+            echo -e "  ${GREEN}管理令牌已设置${NC}"
           else
-            echo -e "  ${RED}令牌不能为空或使用默认值，按回车继续...${NC}"
-            deregister_trap; read -r; register_trap
+            echo -e "  ${RED}令牌不能为空或使用默认值${NC}"
           fi
+          read -rp "  按回车键继续" _
           ;;
         4)
           echo -e "  ${YELLOW}代理令牌 = 下游 API 调用密钥${NC}"
@@ -982,15 +983,16 @@ show_interactive_menu() {
           register_trap
           if [ -n "$new_proxy" ] && [ "$new_proxy" != "change-me-proxy-sk-token" ]; then
             menu_proxy_token="$new_proxy"
+            echo -e "  ${GREEN}代理令牌已设置${NC}"
           else
-            echo -e "  ${RED}令牌不能为空或使用默认值，按回车继续...${NC}"
-            deregister_trap; read -r; register_trap
+            echo -e "  ${RED}令牌不能为空或使用默认值${NC}"
           fi
+          read -rp "  按回车键继续" _
           ;;
         0)
           if [ "$can_start" = "no" ]; then
-            echo -e "  ${RED}请先设置管理令牌和代理令牌！按回车继续...${NC}"
-            deregister_trap; read -r; register_trap
+            echo -e "  ${RED}请先设置管理令牌和代理令牌！${NC}"
+            read -rp "  按回车键继续" _
             continue
           fi
           INSTALL_MODE="$menu_install_mode"
@@ -1003,11 +1005,9 @@ show_interactive_menu() {
         b|B)
           menu_page="main"
           ;;
-        q|Q)
-          deregister_trap
-          cleanup_terminal
-          echo -e "  ${YELLOW}已退出${NC}"
-          exit 0
+        *)
+          echo -e "  ${RED}无效选择，请重新输入${NC}"
+          read -rp "  按回车键继续" _
           ;;
       esac
     fi
