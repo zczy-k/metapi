@@ -708,58 +708,35 @@ show_interactive_menu() {
   local menu_proxy_token="${CLI_PROXY_TOKEN}"
 
   while true; do
-    # 清屏并显示菜单
-    clear
 
     echo ""
-    echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}${CYAN}║                                                      ║${NC}"
-    echo -e "${BOLD}${CYAN}║          ${BOLD}${GREEN}Metapi 一键部署${NC}${BOLD}${CYAN}                              ║${NC}"
-    echo -e "${BOLD}${CYAN}║                                                      ║${NC}"
-    echo -e "${BOLD}${CYAN}╚══════════════════════════════════════════════════════╝${NC}"
-    echo ""
-
-    # 系统信息
-    echo -e "  ${DIM}系统信息${NC}"
-    echo -e "  ${CYAN}──────────────────────────────────${NC}"
-    echo -e "  平台     ${BOLD}${os} / ${arch}${NC}"
-    echo -e "  内存     ${BOLD}${mem_mb}MB${NC}"
-    echo -e "  磁盘     ${BOLD}${disk_mb}MB 可用${NC}"
+    echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════╗${NC}"
+    echo -e "${BOLD}${CYAN}║          ${BOLD}${GREEN}Metapi 一键部署${NC}${BOLD}${CYAN}                        ║${NC}"
+    echo -e "${BOLD}${CYAN}╚══════════════════════════════════════════════╝${NC}"
+    echo -e "  ${DIM}${os} / ${arch}  内存 ${mem_mb}MB  磁盘 ${disk_mb}MB 可用${NC}"
     echo ""
 
     # 配置项
-    echo -e "  ${DIM}部署配置${NC}"
     echo -e "  ${CYAN}──────────────────────────────────${NC}"
 
-    # 安装模式
-    if [ "$menu_install_mode" = "prebuilt" ]; then
-      echo -e "  ${GREEN}[1]${NC} 安装模式    ${GREEN}预编译下载（推荐低配服务器）${NC}"
-    else
-      echo -e "  ${GREEN}[1]${NC} 安装模式    ${YELLOW}源码编译（需要更多资源）${NC}"
-    fi
-
-    # 端口
-    if port_in_use "$menu_port"; then
-      echo -e "  ${GREEN}[2]${NC} 访问端口    ${RED}${menu_port}（已占用）${NC}"
-    else
-      echo -e "  ${GREEN}[2]${NC} 访问端口    ${BOLD}${menu_port}${NC}"
-    fi
+    echo -e "  ${GREEN}[1]${NC} 安装模式    $( [ "$menu_install_mode" = "prebuilt" ] && echo "${GREEN}预编译下载（推荐）${NC}" || echo "${YELLOW}源码编译${NC}" )"
+    echo -e "  ${GREEN}[2]${NC} 访问端口    $( port_in_use "$menu_port" && echo "${RED}${menu_port}（已占用）${NC}" || echo "${BOLD}${menu_port}${NC}" )"
 
     # 令牌
     if [ -n "$menu_auth_token" ]; then
-      local masked_token; masked_token="${menu_auth_token:0:4}****${menu_auth_token: -4}"
+      local masked_token="${menu_auth_token:0:4}****${menu_auth_token: -4}"
       [ ${#menu_auth_token} -le 8 ] && masked_token="****"
       echo -e "  ${GREEN}[3]${NC} 管理令牌    ${BOLD}${masked_token}${NC}"
     else
-      echo -e "  ${GREEN}[3]${NC} 管理令牌    ${RED}（未设置，必须填写）${NC}"
+      echo -e "  ${GREEN}[3]${NC} 管理令牌    ${RED}（未设置，必填）${NC}"
     fi
 
     if [ -n "$menu_proxy_token" ]; then
-      local masked_proxy; masked_proxy="${menu_proxy_token:0:4}****${menu_proxy_token: -4}"
+      local masked_proxy="${menu_proxy_token:0:4}****${menu_proxy_token: -4}"
       [ ${#menu_proxy_token} -le 8 ] && masked_proxy="****"
       echo -e "  ${GREEN}[4]${NC} 代理令牌    ${BOLD}${masked_proxy}${NC}"
     else
-      echo -e "  ${GREEN}[4]${NC} 代理令牌    ${RED}（未设置，必须填写）${NC}"
+      echo -e "  ${GREEN}[4]${NC} 代理令牌    ${RED}（未设置，必填）${NC}"
     fi
 
     echo ""
@@ -771,11 +748,10 @@ show_interactive_menu() {
 
     echo -e "  ${CYAN}──────────────────────────────────${NC}"
     if [ "$can_start" = "yes" ]; then
-      echo -e "  ${BOLD}${GREEN}[0]${NC} ${BOLD}${GREEN}开始安装${NC}"
+      echo -e "  ${BOLD}${GREEN}[0] 开始安装${NC}    ${BOLD}${YELLOW}[q] 退出${NC}"
     else
-      echo -e "  ${DIM}[0] 开始安装（请先设置令牌）${NC}"
+      echo -e "  ${DIM}[0] 开始安装（请先设置令牌）    [q] 退出${NC}"
     fi
-    echo -e "  ${BOLD}${YELLOW}[q]${NC} 退出"
     echo ""
 
     # 提示
@@ -786,50 +762,48 @@ show_interactive_menu() {
         # 切换安装模式
         if [ "$menu_install_mode" = "prebuilt" ]; then
           menu_install_mode="source"
+          echo -e "  ${GREEN}已切换为源码编译模式${NC}"
         else
           menu_install_mode="prebuilt"
+          echo -e "  ${GREEN}已切换为预编译下载模式${NC}"
         fi
         ;;
       2)
         # 修改端口
-        echo ""
         read -rp "  请输入端口号 (1-65535): " new_port
         if [[ "$new_port" =~ ^[0-9]+$ ]] && [ "$new_port" -ge 1 ] && [ "$new_port" -le 65535 ]; then
           menu_port="$new_port"
+          echo -e "  ${GREEN}端口已设为 ${new_port}${NC}"
         else
           echo -e "  ${RED}无效端口号${NC}"
-          sleep 1
         fi
         ;;
       3)
         # 输入 AUTH_TOKEN
-        echo ""
-        echo -e "  ${YELLOW}管理令牌 (AUTH_TOKEN)${NC} = 管理后台登录密码"
+        echo -e "  ${YELLOW}管理令牌 = 管理后台登录密码${NC}"
         read -rp "  请输入: " new_token
         if [ -n "$new_token" ] && [ "$new_token" != "change-me-admin-token" ]; then
           menu_auth_token="$new_token"
+          echo -e "  ${GREEN}管理令牌已设置${NC}"
         else
           echo -e "  ${RED}令牌不能为空或使用默认值${NC}"
-          sleep 1
         fi
         ;;
       4)
         # 输入 PROXY_TOKEN
-        echo ""
-        echo -e "  ${YELLOW}代理令牌 (PROXY_TOKEN)${NC} = 下游 API 调用密钥"
+        echo -e "  ${YELLOW}代理令牌 = 下游 API 调用密钥${NC}"
         read -rp "  请输入: " new_proxy
         if [ -n "$new_proxy" ] && [ "$new_proxy" != "change-me-proxy-sk-token" ]; then
           menu_proxy_token="$new_proxy"
+          echo -e "  ${GREEN}代理令牌已设置${NC}"
         else
           echo -e "  ${RED}令牌不能为空或使用默认值${NC}"
-          sleep 1
         fi
         ;;
       0)
         # 开始安装
         if [ "$can_start" = "no" ]; then
           echo -e "  ${RED}请先设置管理令牌和代理令牌！${NC}"
-          sleep 1
           continue
         fi
         # 将菜单选择写入全局变量
