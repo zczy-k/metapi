@@ -35,11 +35,19 @@ readonly MARKER_FILE="${APP_DIR}/.metapi_installed"
 readonly MARKER_VERSION="6"
 readonly SWAP_FILE="/swapfile_metapi"
 readonly SYSCTL_CONF="/etc/sysctl.d/99-metapi.conf"
+readonly NGINX_AVAILABLE_DIR="/etc/nginx/sites-available"
+readonly NGINX_ENABLED_DIR="/etc/nginx/sites-enabled"
+readonly NGINX_METAPI_CONF="${NGINX_AVAILABLE_DIR}/metapi.conf"
+readonly NGINX_METAPI_ENABLED="${NGINX_ENABLED_DIR}/metapi.conf"
+readonly NGINX_SSL_DIR="/etc/letsencrypt/live"
 
 ACTUAL_PORT="${DEFAULT_PORT}"
 FORCE_MODE=""
 CLI_AUTH_TOKEN=""
 CLI_PROXY_TOKEN=""
+DOMAIN_NAME=""
+DOMAIN_LISTEN_PORT=""
+CERTBOT_EMAIL=""
 SKIP_MENU=0
 
 declare -a COMPLETED_STEPS=()
@@ -103,6 +111,9 @@ parse_args() {
       --repair)         FORCE_MODE="repair"; shift ;;
       --token)          CLI_AUTH_TOKEN="${2:-}"; SKIP_MENU=1; shift 2 ;;
       --proxy-token)    CLI_PROXY_TOKEN="${2:-}"; SKIP_MENU=1; shift 2 ;;
+      --domain)         DOMAIN_NAME="${2:-}"; SKIP_MENU=1; shift 2 ;;
+      --listen-port)    DOMAIN_LISTEN_PORT="${2:-}"; shift 2 ;;
+      --cert-email)     CERTBOT_EMAIL="${2:-}"; shift 2 ;;
       --yes|-y)         SKIP_MENU=1; shift ;;
       --help|-h)
         echo "用法: sudo bash metapi-deploy.sh [选项]"
@@ -114,6 +125,9 @@ parse_args() {
         echo "  --repair          依赖修复"
         echo "  --token TOKEN     指定 AUTH_TOKEN（跳过交互菜单）"
         echo "  --proxy-token PT  指定 PROXY_TOKEN（跳过交互菜单）"
+        echo "  --domain DOMAIN   指定域名（自动配置 Nginx 反向代理）"
+        echo "  --listen-port PT  指定外部访问端口（默认 443 或 4000）"
+        echo "  --cert-email EMAIL 指定邮箱，自动申请 Let's Encrypt 证书"
         echo "  --yes, -y         非交互式确认"
         echo "  --help, -h        显示帮助"
         exit 0 ;;
@@ -268,6 +282,127 @@ auto_resolve_port() {
   ACTUAL_PORT="$new_port"
 }
 
+detect_nginx() {
+  command -v nginx &>/dev/null && nginx -v 2>&1 | grep -q nginx
+}
+
+install_nginx() {
+  if detect_nginx; then
+    info "Nginx 已安装，直接复用"
+    return 0
+  fi
+  info "安装 Nginx..."
+  apt-get install -y -qq nginx 2>&1 || { error "Nginx 安装失败"; return 1; }
+  systemctl enable --now nginx 2>/dev/null || true
+  success "Nginx 安装完成"
+}
+
+reload_nginx() {
+  if detect_nginx; then
+    systemctl is-active nginx &>/dev/null && nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null
+  fi
+}
+
+remove_nginx_metapi_conf() {
+  local found=0
+  if [ -f "${NGINX_METAPI_ENABLED}" ]; then
+    warn "发现 Metapi Nginx 配置（已启用），正在移除..."
+    rm -f "${NGINX_METAPI_ENABLED}"
+    found=1
+  fi
+  if [ -f "${NGINX_METAPI_CONF}" ]; then
+    warn "发现 Metapi Nginx 配置文件，正在移除..."
+    rm -f "${NGINX_METAPI_CONF}"
+    found=1
+  fi
+  if [ "$found" -eq 1 ]; then
+    reload_nginx
+  fi
+}
+
+configure_nginx_proxy() {
+  local domain="$1" listen_port="$2" upstream_port="$3"
+
+  info "写入 Nginx 反向代理配置..."
+
+  if [ -n "$domain" ]; then
+    cat > "${NGINX_METAPI_CONF}" << NGINX_EOF
+server {
+    listen ${listen_port};
+    server_name ${domain};
+
+    location / {
+        proxy_pass http://127.0.0.1:${upstream_port};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_read_timeout 300s;
+        proxy_buffering off;
+        proxy_cache off;
+    }
+}
+NGINX_EOF
+  else
+    cat > "${NGINX_METAPI_CONF}" << NGINX_EOF
+server {
+    listen ${listen_port};
+    server_name _;
+
+    location / {
+        proxy_pass http://127.0.0.1:${upstream_port};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_read_timeout 300s;
+        proxy_buffering off;
+        proxy_cache off;
+    }
+}
+NGINX_EOF
+  fi
+
+  ln -sf "${NGINX_METAPI_CONF}" "${NGINX_METAPI_ENABLED}"
+
+  if nginx -t 2>/dev/null; then
+    reload_nginx
+    success "Nginx 配置生效"
+  else
+    error "Nginx 配置测试失败，请检查"
+    nginx -t 2>&1
+    return 1
+  fi
+}
+
+setup_ssl_cert() {
+  local domain="$1" email="$2"
+
+  if [ ! -d "${NGINX_SSL_DIR}/${domain}" ]; then
+    if ! command -v certbot &>/dev/null; then
+      info "安装 certbot..."
+      apt-get install -y -qq certbot python3-certbot-nginx 2>&1 || { error "certbot 安装失败"; return 1; }
+    fi
+
+    info "申请 Let's Encrypt 证书..."
+    local certbot_args="-n --nginx -d ${domain}"
+    [ -n "$email" ] && certbot_args="$certbot_args -m ${email}" || certbot_args="$certbot_args --register-unsafely-without-email"
+
+    if certbot $certbot_args --agree-tos --redirect 2>&1; then
+      success "SSL 证书申请成功"
+    else
+      warn "certbot 自动配置失败，尝试手动..."
+      certbot certonly --nginx -d "${domain}" 2>&1 || { warn "证书申请暂时失败，可稍后手动执行: certbot --nginx -d ${domain}"; return 1; }
+    fi
+  else
+    info "SSL 证书已存在: ${NGINX_SSL_DIR}/${domain}"
+  fi
+}
+
+detect_nginx_metapi_conf() {
+  [ -f "${NGINX_METAPI_CONF}" ] || [ -f "${NGINX_METAPI_ENABLED}" ]
+}
+
 install_node() {
   if command -v node &>/dev/null; then
     local major; major=$(node -v | sed 's/v//' | cut -d. -f1)
@@ -376,6 +511,11 @@ pre_install_cleanup() {
   if [ -f "${SYSCTL_CONF}" ]; then
     warn "发现残留 sysctl 配置，正在清理..."
     rm -f "${SYSCTL_CONF}"
+    found_residual=1
+  fi
+
+  if detect_nginx_metapi_conf; then
+    remove_nginx_metapi_conf
     found_residual=1
   fi
 
@@ -686,6 +826,9 @@ user=${APP_USER}
 dir=${APP_DIR}
 service=${SERVICE_FILE}
 port=${ACTUAL_PORT}
+domain=${DOMAIN_NAME}
+listen_port=${DOMAIN_LISTEN_PORT}
+cert_email=${CERTBOT_EMAIL}
 EOF
   chown "${APP_USER}:${APP_USER}" "${MARKER_FILE}" 2>/dev/null
 }
@@ -732,21 +875,22 @@ show_firewall_hint() {
 
   local fw_cmd=""
   if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "active"; then
-    fw_cmd="ufw allow ${ACTUAL_PORT}/tcp"
+    fw_cmd="ufw allow ${DOMAIN_LISTEN_PORT:-$ACTUAL_PORT}/tcp"
   elif command -v firewall-cmd &>/dev/null && firewall-cmd --state 2>/dev/null | grep -q "running"; then
-    fw_cmd="firewall-cmd --permanent --add-port=${ACTUAL_PORT}/tcp && firewall-cmd --reload"
+    fw_cmd="firewall-cmd --permanent --add-port=${DOMAIN_LISTEN_PORT:-$ACTUAL_PORT}/tcp && firewall-cmd --reload"
   fi
 
   if [ -n "$fw_cmd" ]; then
-    echo -e "  检测到防火墙，请执行: ${CYAN}${fw_cmd}${NC}"
+    echo -e "  ${YELLOW}请执行:${NC} ${CYAN}${fw_cmd}${NC}"
   fi
 
-  echo -e "  ${YELLOW}⚠ 云服务器需在安全组中放行 ${ACTUAL_PORT}/TCP${NC}"
+  local ports_to_check="${DOMAIN_LISTEN_PORT:-$ACTUAL_PORT}"
+  echo -e "  ${YELLOW}请在云服务器安全组放行 ${ports_to_check}/TCP${NC}"
 
   if curl -sf --connect-timeout 3 "http://127.0.0.1:${ACTUAL_PORT}" >/dev/null 2>&1; then
-    success "端口 ${ACTUAL_PORT} 本地可达 ✓"
+    success "Metapi 服务本地可达 ✓"
   else
-    warn "端口 ${ACTUAL_PORT} 暂未响应（服务可能仍在启动中）"
+    warn "Metapi 服务暂未响应（可能仍在启动中）"
   fi
 }
 
@@ -759,6 +903,9 @@ show_interactive_menu() {
   local menu_port="${ACTUAL_PORT}"
   local menu_auth_token="${CLI_AUTH_TOKEN}"
   local menu_proxy_token="${CLI_PROXY_TOKEN}"
+  local menu_domain="${DOMAIN_NAME}"
+  local menu_listen_port="${DOMAIN_LISTEN_PORT}"
+  local menu_cert_email="${CERTBOT_EMAIL}"
 
   local menu_page="main"
   local choice=""
@@ -807,6 +954,7 @@ show_interactive_menu() {
         echo -e "  ${GREEN}7)${NC} 完整卸载（删除数据）"
         echo -e "  ${GREEN}8)${NC} 升级到最新版本"
         echo -e "  ${GREEN}9)${NC} 查看运行日志"
+        echo -e "  ${GREEN}10)${NC} 配置 SSL 证书 / 域名"
       else
         echo -e "  ${DIM}4) 启动服务（未安装）${NC}"
         echo -e "  ${DIM}5) 停止服务（未安装）${NC}"
@@ -816,7 +964,7 @@ show_interactive_menu() {
       echo ""
       echo -e "  ${CYAN}0)${NC} 退出"
       echo ""
-      local max_opt=7; [ "$is_installed" = "yes" ] && max_opt=9
+      local max_opt=7; [ "$is_installed" = "yes" ] && max_opt=10
       prompt_read "  请输入数字 [0-${max_opt}]: " choice
       echo ""
 
@@ -829,6 +977,14 @@ show_interactive_menu() {
             [ -n "$env_auth" ] && menu_auth_token="$env_auth"
             local env_proxy; env_proxy=$(grep '^PROXY_TOKEN=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2)
             [ -n "$env_proxy" ] && menu_proxy_token="$env_proxy"
+          fi
+          if [ "$is_installed" = "yes" ] && [ -f "${MARKER_FILE}" ]; then
+            local mk_domain; mk_domain=$(grep '^domain=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2)
+            [ -n "$mk_domain" ] && menu_domain="$mk_domain"
+            local mk_listen_port; mk_listen_port=$(grep '^listen_port=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2)
+            [ -n "$mk_listen_port" ] && menu_listen_port="$mk_listen_port"
+            local mk_cert_email; mk_cert_email=$(grep '^cert_email=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2)
+            [ -n "$mk_cert_email" ] && menu_cert_email="$mk_cert_email"
           fi
           menu_page="install"
           ;;
@@ -932,6 +1088,21 @@ show_interactive_menu() {
             register_trap
           fi
           ;;
+        10)
+          if [ "$is_installed" = "yes" ]; then
+            if [ -f "${MARKER_FILE}" ]; then
+              local mk_domain; mk_domain=$(grep '^domain=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2 || echo "")
+              local mk_listen_port; mk_listen_port=$(grep '^listen_port=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2 || echo "")
+              local mk_cert_email; mk_cert_email=$(grep '^cert_email=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2 || echo "")
+              [ -n "$mk_domain" ] && DOMAIN_NAME="$mk_domain"
+              [ -n "$mk_listen_port" ] && DOMAIN_LISTEN_PORT="$mk_listen_port"
+              [ -n "$mk_cert_email" ] && CERTBOT_EMAIL="$mk_cert_email"
+            fi
+            deregister_trap
+            _configure_ssl_domain_interactive
+            register_trap
+          fi
+          ;;
         0|q|Q)
           deregister_trap
           cleanup_terminal
@@ -950,7 +1121,7 @@ show_interactive_menu() {
 
       local port_info="${menu_port}"
       port_in_use "$menu_port" && port_info="${menu_port} ${RED}(端口已占用)${NC}"
-      echo -e "  ${GREEN}1)${NC} 访问端口:  ${BOLD}${port_info}${NC}"
+      echo -e "  ${GREEN}1)${NC} Metapi 端口:  ${BOLD}${port_info}${NC}"
 
       if [ -n "$menu_auth_token" ]; then
         local masked_auth="${menu_auth_token:0:4}****${menu_auth_token: -4}"
@@ -968,6 +1139,21 @@ show_interactive_menu() {
         echo -e "  ${GREEN}3)${NC} 代理令牌:  ${RED}（未设置，必填）${NC}"
       fi
 
+      if [ -n "$menu_domain" ]; then
+        echo -e "  ${GREEN}4)${NC} 域名:       ${BOLD}${menu_domain}${NC}"
+      else
+        echo -e "  ${GREEN}4)${NC} 域名:       ${DIM}（留空则仅 IP 访问）${NC}"
+      fi
+
+      local lp_info="${menu_listen_port}"
+      echo -e "  ${GREEN}5)${NC} 外部端口:  ${BOLD}${lp_info:-${DIM}（默认 443 或 4000）${NC}}"
+
+      if [ -n "$menu_cert_email" ]; then
+        echo -e "  ${GREEN}6)${NC} 证书邮箱:  ${BOLD}${menu_cert_email}${NC}"
+      else
+        echo -e "  ${GREEN}6)${NC} 证书邮箱:  ${DIM}（留空不自动申请证书）${NC}"
+      fi
+
       local can_start="yes"
       [ -z "$menu_auth_token" ] && can_start="no"
       [ -z "$menu_proxy_token" ] && can_start="no"
@@ -976,17 +1162,17 @@ show_interactive_menu() {
       echo -e "  ${CYAN}0)${NC} 开始安装"
       echo -e "  ${CYAN}b)${NC} 返回主菜单"
       echo ""
-      prompt_read "  请输入 [0-3, b]: " choice
+      prompt_read "  请输入 [0-6, b]: " choice
       echo ""
 
       case "$choice" in
         1)
           deregister_trap
-          prompt_read "  请输入端口号 [1-65535]: " new_port
+          prompt_read "  Metapi 内部端口 [1-65535]: " new_port
           register_trap
           if [[ "$new_port" =~ ^[0-9]+$ ]] && [ "$new_port" -ge 1 ] && [ "$new_port" -le 65535 ]; then
             menu_port="$new_port"
-            echo -e "  ${GREEN}端口已更新为 ${menu_port}${NC}"
+            echo -e "  ${GREEN}内部端口已更新为 ${menu_port}${NC}"
           else
             echo -e "  ${RED}无效端口号${NC}"
           fi
@@ -1018,6 +1204,41 @@ show_interactive_menu() {
           fi
           prompt_read "  按回车键继续" _
           ;;
+        4)
+          deregister_trap
+          prompt_read "  输入域名（如 api.example.com，留空取消）: " new_domain
+          register_trap
+          if [ -n "$new_domain" ]; then
+            menu_domain="$new_domain"
+            [ -z "$menu_listen_port" ] && menu_listen_port="443"
+            echo -e "  ${GREEN}域名已设置为 ${menu_domain}${NC}"
+          else
+            menu_domain=""
+            menu_listen_port=""
+            echo -e "  ${GREEN}域名已取消${NC}"
+          fi
+          prompt_read "  按回车键继续" _
+          ;;
+        5)
+          deregister_trap
+          prompt_read "  外部访问端口 [1-65535]（设置域名后 443，仅 IP 访问则 4000）: " new_lp
+          register_trap
+          if [[ "$new_lp" =~ ^[0-9]+$ ]] && [ "$new_lp" -ge 1 ] && [ "$new_lp" -le 65535 ]; then
+            menu_listen_port="$new_lp"
+            echo -e "  ${GREEN}外部端口已更新为 ${menu_listen_port}${NC}"
+          else
+            echo -e "  ${RED}无效端口号${NC}"
+          fi
+          prompt_read "  按回车键继续" _
+          ;;
+        6)
+          deregister_trap
+          prompt_read "  输入邮箱（用于 Let's Encrypt 证书通知，留空则注册不接收邮件）: " new_email
+          register_trap
+          menu_cert_email="$new_email"
+          echo -e "  ${GREEN}邮箱已设置${NC}"
+          prompt_read "  按回车键继续" _
+          ;;
         0)
           if [ "$can_start" = "no" ]; then
             echo -e "  ${RED}请先设置管理令牌和代理令牌！${NC}"
@@ -1027,12 +1248,19 @@ show_interactive_menu() {
           ACTUAL_PORT="$menu_port"
           CLI_AUTH_TOKEN="$menu_auth_token"
           CLI_PROXY_TOKEN="$menu_proxy_token"
+          DOMAIN_NAME="$menu_domain"
+          DOMAIN_LISTEN_PORT="${menu_listen_port:-${DOMAIN_NAME:+443}}"
+          [ -z "$DOMAIN_LISTEN_PORT" ] && DOMAIN_LISTEN_PORT="$ACTUAL_PORT"
+          CERTBOT_EMAIL="$menu_cert_email"
 
           echo ""
           echo -e "  ${BOLD}── 安装摘要 ──${NC}"
-          echo -e "  访问端口:  ${CYAN}${ACTUAL_PORT}${NC}"
-          echo -e "  管理令牌:  ${CYAN}已设置${NC}"
-          echo -e "  代理令牌:  ${CYAN}已设置${NC}"
+          echo -e "  Metapi 端口: ${CYAN}${ACTUAL_PORT}${NC}"
+          if [ -n "$DOMAIN_NAME" ]; then
+            echo -e "  域名:       ${CYAN}${DOMAIN_NAME}:${DOMAIN_LISTEN_PORT}${NC}"
+          fi
+          echo -e "  管理令牌:   ${CYAN}已设置${NC}"
+          echo -e "  代理令牌:   ${CYAN}已设置${NC}"
           echo ""
           prompt_read "  确认开始安装？[Y/n]: " confirm_start
           if [ "$confirm_start" = "n" ] || [ "$confirm_start" = "N" ]; then
@@ -1084,6 +1312,16 @@ show_status_info() {
 
   local configured_port; configured_port=$(grep '^PORT=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2 || echo "${DEFAULT_PORT}")
   echo -e "  监听端口:  ${BOLD}${configured_port}${NC}"
+
+  local mk_domain; mk_domain=$(grep '^domain=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2 || echo "")
+  if [ -n "$mk_domain" ]; then
+    local mk_listen_port; mk_listen_port=$(grep '^listen_port=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2 || echo "")
+    echo -e "  域名:      ${CYAN}${mk_domain}${NC}"
+    [ -n "$mk_listen_port" ] && echo -e "  外部端口:  ${BOLD}${mk_listen_port}${NC}"
+    if [ -d "${NGINX_SSL_DIR}/${mk_domain}" ]; then
+      echo -e "  SSL 证书:  ${GREEN}✓ 已签发${NC}"
+    fi
+  fi
 
   local pid; pid=$(systemctl show "${SERVICE_NAME}" --property=MainPID --value 2>/dev/null || echo "")
   if [ -n "$pid" ] && [ "$pid" != "0" ]; then
@@ -1153,6 +1391,16 @@ do_install() {
   if ! run_step "安装服务并设置权限" _install_service_and_perms; then show_failure_report; return 1; fi
   if ! run_step "启动服务" start_service; then show_failure_report; return 1; fi
 
+  if [ -n "$DOMAIN_NAME" ] || [ -n "$DOMAIN_LISTEN_PORT" ]; then
+    run_step "配置 Nginx 反向代理" _setup_nginx_proxy || true
+  fi
+
+  if [ -n "$DOMAIN_NAME" ] && [ -n "$CERTBOT_EMAIL" ]; then
+    run_step "申请 SSL 证书" _setup_ssl_cert || true
+  fi
+
+  write_marker
+
   echo ""
   echo -e "${BOLD}${GREEN}╔══════════════════════════════════════════════╗${NC}"
   echo -e "${BOLD}${GREEN}║            部署完成！                        ║${NC}"
@@ -1160,7 +1408,11 @@ do_install() {
   echo ""
 
   local ip_addr; ip_addr=$(hostname -I 2>/dev/null | awk '{print $1}' || echo '服务器IP')
-  echo -e "  访问地址:  ${CYAN}http://${ip_addr}:${ACTUAL_PORT}${NC}"
+  if [ -n "$DOMAIN_NAME" ]; then
+    echo -e "  访问地址:  ${CYAN}http://${DOMAIN_NAME}:${DOMAIN_LISTEN_PORT}${NC}"
+    echo -e "  （SSL 证书设置后可用 HTTPS: ${CYAN}https://${DOMAIN_NAME}${NC}）"
+  fi
+  echo -e "  IP 直连:   ${CYAN}http://${ip_addr}:${DOMAIN_LISTEN_PORT:-$ACTUAL_PORT}${NC}"
   echo -e "  管理令牌:  .env 中的 AUTH_TOKEN"
   echo ""
   echo -e "  ${BOLD}常用命令:${NC}"
@@ -1184,6 +1436,86 @@ _install_service_and_perms() {
   install_systemd_service
   set_permissions
   write_marker
+}
+
+_setup_nginx_proxy() {
+  install_nginx || return 1
+  configure_nginx_proxy "${DOMAIN_NAME}" "${DOMAIN_LISTEN_PORT}" "${ACTUAL_PORT}"
+}
+
+_setup_ssl_cert() {
+  setup_ssl_cert "${DOMAIN_NAME}" "${CERTBOT_EMAIL}"
+}
+
+_configure_ssl_domain_interactive() {
+  while true; do
+    echo ""
+    echo -e "${BOLD}${CYAN}  ── SSL / 域名配置 ──${NC}"
+    echo ""
+    echo -e "  ${GREEN}1)${NC} 设置域名:     ${BOLD}${DOMAIN_NAME:-${DIM}（未设置）${NC}}"
+    echo -e "  ${GREEN}2)${NC} 外部访问端口: ${BOLD}${DOMAIN_LISTEN_PORT:-$ACTUAL_PORT}${NC}"
+    echo -e "  ${GREEN}3)${NC} 证书邮箱:    ${BOLD}${CERTBOT_EMAIL:-${DIM}（未设置）${NC}}"
+    echo -e "  ${GREEN}4)${NC} 立即配置 Nginx + SSL"
+    echo -e "  ${GREEN}5)${NC} 移除 Nginx 配置（不影响 Metapi 服务）"
+    echo ""
+    echo -e "  ${CYAN}b)${NC} 返回主菜单"
+    echo ""
+    prompt_read "  请输入 [1-5, b]: " ssl_choice
+    echo ""
+
+    case "$ssl_choice" in
+      1)
+        prompt_read "  输入域名（如 api.example.com，留空取消）: " new_d
+        if [ -n "$new_d" ]; then
+          DOMAIN_NAME="$new_d"
+          [ -z "$DOMAIN_LISTEN_PORT" ] && DOMAIN_LISTEN_PORT="443"
+        else
+          DOMAIN_NAME=""
+        fi
+        prompt_read "  按回车键继续" _
+        ;;
+      2)
+        prompt_read "  外部访问端口 [1-65535]: " new_lp
+        if [[ "$new_lp" =~ ^[0-9]+$ ]] && [ "$new_lp" -ge 1 ] && [ "$new_lp" -le 65535 ]; then
+          DOMAIN_LISTEN_PORT="$new_lp"
+        fi
+        prompt_read "  按回车键继续" _
+        ;;
+      3)
+        prompt_read "  输入邮箱（用于 Let's Encrypt 通知）: " new_e
+        CERTBOT_EMAIL="$new_e"
+        prompt_read "  按回车键继续" _
+        ;;
+      4)
+        info "配置 Nginx 反向代理..."
+        install_nginx
+        configure_nginx_proxy "${DOMAIN_NAME}" "${DOMAIN_LISTEN_PORT}" "${ACTUAL_PORT}"
+        if [ -n "$DOMAIN_NAME" ] && [ -n "$CERTBOT_EMAIL" ]; then
+          setup_ssl_cert "${DOMAIN_NAME}" "${CERTBOT_EMAIL}"
+        fi
+        write_marker
+        prompt_read "  按回车键返回" _
+        ;;
+      5)
+        remove_nginx_metapi_conf
+        if [ -n "$DOMAIN_NAME" ] && [ -d "${NGINX_SSL_DIR}/${DOMAIN_NAME}" ]; then
+          echo -e "  ${YELLOW}是否同时移除证书文件？${NC}"
+          echo -e "  ${YELLOW}移除后不可恢复。${NC}"
+          prompt_read "  确认移除？[y/N]: " rm_cert
+          if [ "$rm_cert" = "y" ] || [ "$rm_cert" = "Y" ]; then
+            rm -rf "${NGINX_SSL_DIR}/${DOMAIN_NAME}"
+            success "证书已移除"
+          fi
+        fi
+        prompt_read "  按回车键返回" _
+        ;;
+      b|B)
+        write_marker
+        return 0
+        ;;
+      *) echo -e "  ${RED}无效选择${NC}"; prompt_read "  按回车键继续" _ ;;
+    esac
+  done
 }
 
 do_repair() {
@@ -1268,6 +1600,8 @@ do_uninstall() {
   [ -f "${SWAP_FILE}" ] && { swapoff "${SWAP_FILE}" 2>/dev/null || true; rm -f "${SWAP_FILE}"; sed -i "\|${SWAP_FILE}|d" /etc/fstab; }
   rm -f "${SYSCTL_CONF}" "${MARKER_FILE}"
 
+  remove_nginx_metapi_conf
+
   echo ""
   success "卸载完成（数据已保留）"
   echo -e "  数据: ${CYAN}${APP_DIR}/data${NC}"
@@ -1290,6 +1624,8 @@ do_uninstall_all() {
 
   [ -f "${SWAP_FILE}" ] && { swapoff "${SWAP_FILE}" 2>/dev/null || true; rm -f "${SWAP_FILE}"; sed -i "\|${SWAP_FILE}|d" /etc/fstab; }
   rm -f "${SYSCTL_CONF}"; rm -rf "${LOG_DIR}"
+
+  remove_nginx_metapi_conf
 
   echo ""
   success "完整卸载完成"
