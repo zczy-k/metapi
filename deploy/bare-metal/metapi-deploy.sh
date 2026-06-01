@@ -701,13 +701,18 @@ show_interactive_menu() {
   local mem_mb; mem_mb=$(get_memory_mb)
   local disk_mb; disk_mb=$(get_disk_mb)
 
-  # 菜单内可编辑的变量（使用全局变量）
+  # 菜单内可编辑的变量
   local menu_install_mode="${INSTALL_MODE}"
   local menu_port="${ACTUAL_PORT}"
   local menu_auth_token="${CLI_AUTH_TOKEN}"
   local menu_proxy_token="${CLI_PROXY_TOKEN}"
 
+  # 清屏一次建立干净起点，后续循环原地重绘
+  clear
+
   while true; do
+    # 光标移到左上角原地重绘（不清屏，不闪烁）
+    printf '\033[H'
 
     echo ""
     echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════╗${NC}"
@@ -715,14 +720,10 @@ show_interactive_menu() {
     echo -e "${BOLD}${CYAN}╚══════════════════════════════════════════════╝${NC}"
     echo -e "  ${DIM}${os} / ${arch}  内存 ${mem_mb}MB  磁盘 ${disk_mb}MB 可用${NC}"
     echo ""
-
-    # 配置项
     echo -e "  ${CYAN}──────────────────────────────────${NC}"
-
     echo -e "  ${GREEN}[1]${NC} 安装模式    $( [ "$menu_install_mode" = "prebuilt" ] && echo "${GREEN}预编译下载（推荐）${NC}" || echo "${YELLOW}源码编译${NC}" )"
     echo -e "  ${GREEN}[2]${NC} 访问端口    $( port_in_use "$menu_port" && echo "${RED}${menu_port}（已占用）${NC}" || echo "${BOLD}${menu_port}${NC}" )"
 
-    # 令牌
     if [ -n "$menu_auth_token" ]; then
       local masked_token="${menu_auth_token:0:4}****${menu_auth_token: -4}"
       [ ${#menu_auth_token} -le 8 ] && masked_token="****"
@@ -739,74 +740,67 @@ show_interactive_menu() {
       echo -e "  ${GREEN}[4]${NC} 代理令牌    ${RED}（未设置，必填）${NC}"
     fi
 
-    echo ""
-
-    # 操作选项
     local can_start="yes"
     [ -z "$menu_auth_token" ] && can_start="no"
     [ -z "$menu_proxy_token" ] && can_start="no"
 
+    echo ""
     echo -e "  ${CYAN}──────────────────────────────────${NC}"
     if [ "$can_start" = "yes" ]; then
       echo -e "  ${BOLD}${GREEN}[0] 开始安装${NC}    ${BOLD}${YELLOW}[q] 退出${NC}"
     else
       echo -e "  ${DIM}[0] 开始安装（请先设置令牌）    [q] 退出${NC}"
     fi
-    echo ""
 
-    # 提示
+    # 清除菜单下方的残留内容
+    printf '\033[J'
+
+    echo ""
     read -rp "  请选择 [0-4, q]: " choice
 
     case "$choice" in
       1)
-        # 切换安装模式
         if [ "$menu_install_mode" = "prebuilt" ]; then
           menu_install_mode="source"
-          echo -e "  ${GREEN}已切换为源码编译模式${NC}"
         else
           menu_install_mode="prebuilt"
-          echo -e "  ${GREEN}已切换为预编译下载模式${NC}"
         fi
         ;;
       2)
-        # 修改端口
         read -rp "  请输入端口号 (1-65535): " new_port
         if [[ "$new_port" =~ ^[0-9]+$ ]] && [ "$new_port" -ge 1 ] && [ "$new_port" -le 65535 ]; then
           menu_port="$new_port"
-          echo -e "  ${GREEN}端口已设为 ${new_port}${NC}"
         else
-          echo -e "  ${RED}无效端口号${NC}"
+          echo -e "  ${RED}无效端口号，按回车继续...${NC}"
+          read -r
         fi
         ;;
       3)
-        # 输入 AUTH_TOKEN
         echo -e "  ${YELLOW}管理令牌 = 管理后台登录密码${NC}"
         read -rp "  请输入: " new_token
         if [ -n "$new_token" ] && [ "$new_token" != "change-me-admin-token" ]; then
           menu_auth_token="$new_token"
-          echo -e "  ${GREEN}管理令牌已设置${NC}"
         else
-          echo -e "  ${RED}令牌不能为空或使用默认值${NC}"
+          echo -e "  ${RED}令牌不能为空或使用默认值，按回车继续...${NC}"
+          read -r
         fi
         ;;
       4)
-        # 输入 PROXY_TOKEN
         echo -e "  ${YELLOW}代理令牌 = 下游 API 调用密钥${NC}"
         read -rp "  请输入: " new_proxy
         if [ -n "$new_proxy" ] && [ "$new_proxy" != "change-me-proxy-sk-token" ]; then
           menu_proxy_token="$new_proxy"
-          echo -e "  ${GREEN}代理令牌已设置${NC}"
         else
-          echo -e "  ${RED}令牌不能为空或使用默认值${NC}"
+          echo -e "  ${RED}令牌不能为空或使用默认值，按回车继续...${NC}"
+          read -r
         fi
         ;;
       0)
-        # 开始安装
         if [ "$can_start" = "no" ]; then
-          echo -e "  ${RED}请先设置管理令牌和代理令牌！${NC}"
+          echo -e "  ${RED}请先设置管理令牌和代理令牌！按回车继续...${NC}"
+          read -r
           continue
         fi
-        # 将菜单选择写入全局变量
         INSTALL_MODE="$menu_install_mode"
         ACTUAL_PORT="$menu_port"
         CLI_AUTH_TOKEN="$menu_auth_token"
@@ -816,9 +810,6 @@ show_interactive_menu() {
       q|Q)
         echo -e "  ${YELLOW}已取消${NC}"
         exit 0
-        ;;
-      *)
-        # 无效输入，重新显示菜单
         ;;
     esac
   done
