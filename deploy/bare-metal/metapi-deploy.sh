@@ -711,8 +711,8 @@ show_interactive_menu() {
   clear
 
   while true; do
-    # 光标移到左上角原地重绘（不清屏，不闪烁）
-    printf '\033[H'
+    # 隐藏光标 → 移到顶部重绘 → 用户看不到光标跳动
+    printf '\033[?25l\033[H'
 
     echo ""
     echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════╗${NC}"
@@ -752,8 +752,8 @@ show_interactive_menu() {
       echo -e "  ${DIM}[0] 开始安装（请先设置令牌）    [q] 退出${NC}"
     fi
 
-    # 清除菜单下方的残留内容
-    printf '\033[J'
+    # 清除菜单下方残留内容，然后显示光标
+    printf '\033[J\033[?25h'
 
     echo ""
     read -rp "  请选择 [0-4, q]: " choice
@@ -805,9 +805,11 @@ show_interactive_menu() {
         ACTUAL_PORT="$menu_port"
         CLI_AUTH_TOKEN="$menu_auth_token"
         CLI_PROXY_TOKEN="$menu_proxy_token"
+        printf '\033[?25h'  # 确保光标恢复
         return 0
         ;;
       q|Q)
+        printf '\033[?25h'  # 确保光标恢复
         echo -e "  ${YELLOW}已取消${NC}"
         exit 0
         ;;
