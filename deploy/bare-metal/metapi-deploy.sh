@@ -707,28 +707,27 @@ show_interactive_menu() {
   local menu_auth_token="${CLI_AUTH_TOKEN}"
   local menu_proxy_token="${CLI_PROXY_TOKEN}"
 
-  # 检测是否已安装
-  local is_installed="no"
-  [ -f "${MARKER_FILE}" ] && is_installed="yes"
-
-  # 服务状态
-  local svc_status="未安装"
-  if [ "$is_installed" = "yes" ]; then
-    if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
-      svc_status="运行中"
-    elif systemctl is-enabled --quiet "${SERVICE_NAME}" 2>/dev/null; then
-      svc_status="已停止"
-    else
-      svc_status="异常"
-    fi
-  fi
-
   # 当前菜单页：main / install
   local menu_page="main"
 
   clear
 
   while true; do
+    # 动态刷新安装状态和服务状态
+    local is_installed="no"
+    [ -f "${MARKER_FILE}" ] && is_installed="yes"
+
+    local svc_status="未安装"
+    if [ "$is_installed" = "yes" ]; then
+      if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+        svc_status="运行中"
+      elif systemctl is-enabled --quiet "${SERVICE_NAME}" 2>/dev/null; then
+        svc_status="已停止"
+      else
+        svc_status="异常"
+      fi
+    fi
+
     # 隐藏光标 → 移到顶部重绘
     printf '\033[?25l\033[H'
 
@@ -751,11 +750,20 @@ show_interactive_menu() {
       echo -e "  ${GREEN}[2]${NC} 查看状态"
       echo -e "  ${GREEN}[3]${NC} 修复依赖"
       if [ "$is_installed" = "yes" ]; then
-        echo -e "  ${GREEN}[4]${NC} 卸载（保留数据）"
-        echo -e "  ${GREEN}[5]${NC} 完整卸载（删除数据）"
+        if [ "$svc_status" = "运行中" ]; then
+          echo -e "  ${GREEN}[4]${NC} 重启服务"
+          echo -e "  ${GREEN}[5]${NC} 停止服务"
+        else
+          echo -e "  ${GREEN}[4]${NC} 启动服务"
+          echo -e "  ${DIM}[5] 停止服务（已停止）${NC}"
+        fi
+        echo -e "  ${GREEN}[6]${NC} 卸载（保留数据）"
+        echo -e "  ${GREEN}[7]${NC} 完整卸载（删除数据）"
       else
-        echo -e "  ${DIM}[4] 卸载（未安装）${NC}"
-        echo -e "  ${DIM}[5] 完整卸载（未安装）${NC}"
+        echo -e "  ${DIM}[4] 启动服务（未安装）${NC}"
+        echo -e "  ${DIM}[5] 停止服务（未安装）${NC}"
+        echo -e "  ${DIM}[6] 卸载（未安装）${NC}"
+        echo -e "  ${DIM}[7] 完整卸载（未安装）${NC}"
       fi
       echo ""
       echo -e "  ${CYAN}──────────────────────────────────${NC}"
@@ -763,10 +771,22 @@ show_interactive_menu() {
 
       printf '\033[J\033[?25h'
       echo ""
-      read -rp "  请选择 [1-5, q]: " choice
+      read -rp "  请选择 [1-7, q]: " choice
 
       case "$choice" in
         1)
+          # 进入安装配置子菜单
+          # 如果已安装，预填当前 .env 中的配置
+          if [ "$is_installed" = "yes" ] && [ -f "${ENV_FILE}" ]; then
+            local env_port; env_port=$(grep '^PORT=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2)
+            [ -n "$env_port" ] && menu_port="$env_port"
+            local env_auth; env_auth=$(grep '^AUTH_TOKEN=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2)
+            [ -n "$env_auth" ] && menu_auth_token="$env_auth"
+            local env_proxy; env_proxy=$(grep '^PROXY_TOKEN=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2)
+            [ -n "$env_proxy" ] && menu_proxy_token="$env_proxy"
+            local env_mode; env_mode=$(grep '^install_mode=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2)
+            [ -n "$env_mode" ] && menu_install_mode="$env_mode"
+          fi
           menu_page="install"
           ;;
         2)
@@ -784,19 +804,55 @@ show_interactive_menu() {
         4)
           if [ "$is_installed" = "yes" ]; then
             printf '\033[?25h'
+            if [ "$svc_status" = "运行中" ]; then
+              echo -e "  ${YELLOW}重启服务中...${NC}"
+              systemctl restart "${SERVICE_NAME}" 2>/dev/null
+              if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+                echo -e "  ${GREEN}服务已重启${NC}"
+              else
+                echo -e "  ${RED}服务重启失败${NC}"
+              fi
+            else
+              echo -e "  ${YELLOW}启动服务中...${NC}"
+              systemctl start "${SERVICE_NAME}" 2>/dev/null
+              if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+                echo -e "  ${GREEN}服务已启动${NC}"
+              else
+                echo -e "  ${RED}服务启动失败${NC}"
+              fi
+            fi
+            echo ""
+            read -rp "  按回车返回菜单..."
+          fi
+          ;;
+        5)
+          if [ "$is_installed" = "yes" ] && [ "$svc_status" = "运行中" ]; then
+            printf '\033[?25h'
+            echo -e "  ${YELLOW}停止服务中...${NC}"
+            systemctl stop "${SERVICE_NAME}" 2>/dev/null
+            if ! systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+              echo -e "  ${GREEN}服务已停止${NC}"
+            else
+              echo -e "  ${RED}服务停止失败${NC}"
+            fi
+            echo ""
+            read -rp "  按回车返回菜单..."
+          fi
+          ;;
+        6)
+          if [ "$is_installed" = "yes" ]; then
+            printf '\033[?25h'
             echo ""
             echo -e "  ${YELLOW}确认卸载（保留数据）？[y/N]${NC}"
             read -rp "  " confirm
             if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
               do_uninstall
-              is_installed="no"
-              svc_status="未安装"
               echo ""
               read -rp "  按回车返回菜单..."
             fi
           fi
           ;;
-        5)
+        7)
           if [ "$is_installed" = "yes" ]; then
             printf '\033[?25h'
             echo ""
@@ -804,8 +860,6 @@ show_interactive_menu() {
             read -rp "  " confirm
             if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
               do_uninstall_all
-              is_installed="no"
-              svc_status="未安装"
               echo ""
               read -rp "  按回车返回菜单..."
             fi
@@ -1091,6 +1145,9 @@ _install_service_and_perms() {
 # 依赖修复
 # ═══════════════════════════════════════════════════════════
 do_repair() {
+  COMPLETED_STEPS=()
+  FAILED_STEPS=()
+
   echo ""
   echo -e "${BOLD}${YELLOW}  依赖修复${NC}"
   separator
