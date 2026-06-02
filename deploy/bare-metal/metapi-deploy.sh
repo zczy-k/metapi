@@ -28,18 +28,24 @@ readonly ENV_FILE="${APP_DIR}/.env"
 readonly LOG_DIR="/var/log/${APP_NAME}"
 readonly LOG_FILE="${LOG_DIR}/deploy.log"
 readonly NODE_MAJOR=22
+readonly NODE_RUNTIME_DIR="${APP_DIR}/runtime/node"
+readonly NODE_BIN="${NODE_RUNTIME_DIR}/bin/node"
 readonly RELEASE_API="https://api.github.com/repos/zczy-k/metapi/releases/latest"
 readonly SCRIPT_URL="https://raw.githubusercontent.com/zczy-k/metapi/main/deploy/bare-metal/metapi-deploy.sh"
 readonly DEFAULT_PORT=4000
 readonly MARKER_FILE="${APP_DIR}/.metapi_installed"
 readonly MARKER_VERSION="6"
 readonly SWAP_FILE="/swapfile_metapi"
+readonly SWAP_FLAG="${APP_DIR}/.swap-created-by-deploy"
 readonly SYSCTL_CONF="/etc/sysctl.d/99-metapi.conf"
 readonly NGINX_AVAILABLE_DIR="/etc/nginx/sites-available"
 readonly NGINX_ENABLED_DIR="/etc/nginx/sites-enabled"
-readonly NGINX_METAPI_CONF="${NGINX_AVAILABLE_DIR}/metapi.conf"
-readonly NGINX_METAPI_ENABLED="${NGINX_ENABLED_DIR}/metapi.conf"
+readonly NGINX_CONF_D_DIR="/etc/nginx/conf.d"
+NGINX_METAPI_CONF="${NGINX_AVAILABLE_DIR}/metapi.conf"
+NGINX_METAPI_ENABLED="${NGINX_ENABLED_DIR}/metapi.conf"
 readonly NGINX_SSL_DIR="/etc/letsencrypt/live"
+readonly MANAGED_BY="metapi-deploy.sh"
+readonly MANAGED_MARKER="managed_by=${MANAGED_BY}"
 
 ACTUAL_PORT="${DEFAULT_PORT}"
 FORCE_MODE=""
@@ -48,10 +54,12 @@ CLI_PROXY_TOKEN=""
 DOMAIN_NAME=""
 DOMAIN_LISTEN_PORT=""
 CERTBOT_EMAIL=""
+CERT_MANAGED_BY_SCRIPT="no"
 SKIP_MENU=0
 
 declare -a COMPLETED_STEPS=()
 declare -a FAILED_STEPS=()
+USER_CREATED_BY_SCRIPT="unknown"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'
@@ -64,6 +72,17 @@ step()    { echo -e "${CYAN}[>>>]${NC} $*"; log "STEP" "$*"; }
 log() { local lvl="$1"; shift; [ -d "${LOG_DIR}" ] || mkdir -p "${LOG_DIR}"; echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$lvl] $*" >> "${LOG_FILE}" 2>/dev/null || true; }
 
 separator() { echo -e "${CYAN}──────────────────────────────────────────${NC}"; }
+
+confirm_or_skip() {
+  local prompt="$1"
+  if [ "${SKIP_MENU}" -eq 1 ]; then
+    info "非交互模式，自动确认"
+    return 0
+  fi
+  local answer=""
+  prompt_read "$prompt" answer
+  [ "$answer" = "y" ] || [ "$answer" = "Y" ]
+}
 
 prompt_read() {
   if [ -t 0 ] || [ -e /dev/tty ]; then
@@ -109,8 +128,8 @@ parse_args() {
       --uninstall)      FORCE_MODE="uninstall"; shift ;;
       --uninstall-all)  FORCE_MODE="uninstall-all"; shift ;;
       --repair)         FORCE_MODE="repair"; shift ;;
-      --token)          CLI_AUTH_TOKEN="${2:-}"; SKIP_MENU=1; shift 2 ;;
-      --proxy-token)    CLI_PROXY_TOKEN="${2:-}"; SKIP_MENU=1; shift 2 ;;
+      --token)          CLI_AUTH_TOKEN="${2:-}"; [ -z "$CLI_AUTH_TOKEN" ] && { error "--token 需要指定值"; exit 1; }; SKIP_MENU=1; shift 2 ;;
+      --proxy-token)    CLI_PROXY_TOKEN="${2:-}"; [ -z "$CLI_PROXY_TOKEN" ] && { error "--proxy-token 需要指定值"; exit 1; }; SKIP_MENU=1; shift 2 ;;
       --domain)         DOMAIN_NAME="${2:-}"; SKIP_MENU=1; shift 2 ;;
       --listen-port)    DOMAIN_LISTEN_PORT="${2:-}"; shift 2 ;;
       --cert-email)     CERTBOT_EMAIL="${2:-}"; shift 2 ;;
@@ -234,6 +253,22 @@ get_memory_limit() {
   fi
 }
 
+get_memory_max() {
+  local mem; mem=$(get_memory_mb)
+  if [ "$mem" -lt 1024 ]; then echo "384"
+  elif [ "$mem" -lt 2048 ]; then echo "512"
+  else echo "768"
+  fi
+}
+
+get_cpu_quota() {
+  local cpus; cpus=$(nproc 2>/dev/null || echo 1)
+  if [ "$cpus" -le 1 ]; then echo "80%"
+  elif [ "$cpus" -le 2 ]; then echo "60%"
+  else echo "50%"
+  fi
+}
+
 check_network() {
   local target="${1:-https://github.com}" timeout="${2:-10}"
   curl -sf --connect-timeout "$timeout" --max-time "$timeout" "$target" >/dev/null 2>&1
@@ -262,6 +297,111 @@ get_release_asset_url() {
 
 port_in_use() { ss -tlnp 2>/dev/null | grep -qP ":${1}\b"; }
 
+valid_port() {
+  [[ "${1:-}" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+
+managed_file() {
+  local file="$1"
+  [ -f "$file" ] && grep -qF "${MANAGED_MARKER}" "$file" 2>/dev/null
+}
+
+app_dir_managed() {
+  [ -f "${MARKER_FILE}" ] && grep -qF "${MANAGED_MARKER}" "${MARKER_FILE}" 2>/dev/null
+}
+
+service_file_managed() {
+  managed_file "${SERVICE_FILE}"
+}
+
+nginx_conf_managed() {
+  managed_file "${NGINX_METAPI_CONF}"
+}
+
+sysctl_conf_managed() {
+  managed_file "${SYSCTL_CONF}"
+}
+
+swap_owned_by_script() {
+  [ -f "${SWAP_FLAG}" ] || { [ -f "${SWAP_FILE}" ] && grep -qF "${SWAP_FILE} none swap sw 0 0 # ${MANAGED_BY}" /etc/fstab 2>/dev/null; }
+}
+
+app_user_owned_by_script() {
+  [ -f "${MARKER_FILE}" ] && grep -q '^user_created_by_script=yes$' "${MARKER_FILE}" 2>/dev/null
+}
+
+get_marker_value() {
+  local key="$1"
+  [ -f "${MARKER_FILE}" ] || return 0
+  grep "^${key}=" "${MARKER_FILE}" 2>/dev/null | head -1 | cut -d= -f2-
+}
+
+app_group_name() {
+  id -gn "${APP_USER}" 2>/dev/null || echo "${APP_GROUP}"
+}
+
+safe_remove_service() {
+  if [ -f "${SERVICE_FILE}" ]; then
+    if service_file_managed || app_dir_managed; then
+      if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+        info "停止 ${SERVICE_NAME} 服务..."
+        systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
+      fi
+      systemctl disable "${SERVICE_NAME}" 2>/dev/null || true
+      rm -f "${SERVICE_FILE}"
+      systemctl daemon-reload 2>/dev/null || true
+    else
+      warn "发现同名 systemd 服务但缺少 Metapi 管理标记，跳过删除: ${SERVICE_FILE}"
+    fi
+  fi
+}
+
+get_node_path() {
+  if command -v node &>/dev/null; then
+    local major; major=$(node -v | sed 's/v//' | cut -d. -f1)
+    if [ "$major" -ge "$NODE_MAJOR" ]; then
+      command -v node
+      return 0
+    fi
+  fi
+
+  if [ -x "${NODE_BIN}" ]; then
+    echo "${NODE_BIN}"
+    return 0
+  fi
+
+  return 1
+}
+
+safe_remove_app_user() {
+  if ! id "${APP_USER}" &>/dev/null; then
+    return 0
+  fi
+
+  if app_user_owned_by_script; then
+    userdel "${APP_USER}" 2>/dev/null || true
+  else
+    warn "用户 '${APP_USER}' 不是本脚本创建或无法确认归属，跳过删除"
+  fi
+}
+
+safe_remove_swap() {
+  if swap_owned_by_script; then
+    swapoff "${SWAP_FILE}" 2>/dev/null || true
+    rm -f "${SWAP_FILE}"
+    sed -i "\|${SWAP_FILE}|d" /etc/fstab 2>/dev/null || true
+    rm -f "${SWAP_FLAG}"
+  elif [ -f "${SWAP_FILE}" ]; then
+    warn "发现 ${SWAP_FILE} 但缺少 Metapi 管理标记，跳过删除"
+  fi
+
+  if sysctl_conf_managed; then
+    rm -f "${SYSCTL_CONF}"
+  elif [ -f "${SYSCTL_CONF}" ]; then
+    warn "发现 ${SYSCTL_CONF} 但缺少 Metapi 管理标记，跳过删除"
+  fi
+}
+
 find_available_port() {
   local port="$1"
   while [ "$port" -le 65535 ]; do
@@ -287,19 +427,32 @@ check_port_conflict() {
   local conflicts=""
 
   if port_in_use "$port"; then
+    local listener_info=""
+    if command -v ss &>/dev/null; then
+      listener_info=$(ss -tlnp 2>/dev/null | grep -E ":${port}\s" | head -1 || true)
+    fi
     conflicts="${conflicts}  [TCP] 端口 ${port} 已被其他进程占用"
+    if [ -n "$listener_info" ]; then
+      conflicts="${conflicts}\n         ${listener_info}"
+    fi
   fi
 
   if detect_nginx; then
     if nginx -T 2>/dev/null | grep -qP "^\s+listen\s+${port}\b"; then
-      conflicts="${conflicts}  [Nginx] 端口 ${port} 已在其他 Nginx 配置中使用"
+      local nginx_context=""
+      if nginx -T 2>/dev/null | grep -B5 "listen.*${port}" | grep -q "stream"; then
+        nginx_context="（Nginx stream 模块，可能用于 TLS 代理）"
+      else
+        nginx_context="（Nginx http 模块）"
+      fi
+      conflicts="${conflicts}  [Nginx] 端口 ${port} 已在其他 Nginx 配置中使用${nginx_context}"
     fi
   fi
 
   if [ -n "$conflicts" ]; then
     echo ""
     echo -e "  ${RED}⚠ 端口 ${port} 存在冲突:${NC}"
-    echo "$conflicts" | while IFS= read -r line; do echo -e "  ${RED}${line}${NC}"; done
+    echo -e "$conflicts" | while IFS= read -r line; do echo -e "  ${RED}${line}${NC}"; done
     echo ""
     echo -e "  ${YELLOW}建议更换为其他端口，或用以下命令排查:${NC}"
     echo -e "    ${CYAN}ss -tlnp | grep ':${port} '${NC}"
@@ -310,19 +463,131 @@ check_port_conflict() {
   return 0
 }
 
+validate_domain_dns() {
+  local domain="$1"
+  local server_ip; server_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+
+  if command -v host &>/dev/null; then
+    local resolved_ip; resolved_ip=$(host -t A "$domain" 2>/dev/null | grep "has address" | head -1 | awk '{print $NF}')
+    if [ -z "$resolved_ip" ]; then
+      warn "无法解析域名 ${domain}，请确认 DNS 已正确配置"
+      return 1
+    fi
+    if [ -n "$server_ip" ] && [ "$resolved_ip" != "$server_ip" ]; then
+      warn "域名 ${domain} 解析到 ${resolved_ip}，本机 IP 为 ${server_ip}"
+      warn "请确认 DNS 已正确指向此服务器"
+    fi
+  elif command -v dig &>/dev/null; then
+    local resolved_ip; resolved_ip=$(dig +short "$domain" A 2>/dev/null | tail -1)
+    if [ -z "$resolved_ip" ]; then
+      warn "无法解析域名 ${domain}，请确认 DNS 已正确配置"
+      return 1
+    fi
+    if [ -n "$server_ip" ] && [ "$resolved_ip" != "$server_ip" ]; then
+      warn "域名 ${domain} 解析到 ${resolved_ip}，本机 IP 为 ${server_ip}"
+      warn "请确认 DNS 已正确指向此服务器"
+    fi
+  elif command -v nslookup &>/dev/null; then
+    if ! nslookup "$domain" &>/dev/null; then
+      warn "无法解析域名 ${domain}，请确认 DNS 已正确配置"
+      return 1
+    fi
+  else
+    warn "未安装 DNS 工具（host/dig/nslookup），跳过域名解析验证"
+    warn "请确保域名 ${domain} 已正确解析到此服务器"
+  fi
+  return 0
+}
+
+check_port_80_for_ssl() {
+  if ! command -v ss &>/dev/null; then
+    return 0
+  fi
+
+  local listener_80; listener_80=$(ss -tlnp 2>/dev/null | grep -E ":80\s" | head -1 || true)
+  if [ -z "$listener_80" ]; then
+    return 0
+  fi
+
+  if echo "$listener_80" | grep -q "nginx"; then
+    info "80 端口由 Nginx 占用，将复用现有 Nginx 进行证书验证"
+    return 0
+  fi
+
+  error "80 端口被非 Nginx 程序占用，Let's Encrypt 证书验证需要 80 端口"
+  error "  ${listener_80}"
+  return 1
+}
+
+validate_domain_format() {
+  local domain="$1"
+  if [[ ! "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$ ]]; then
+    error "域名格式无效: ${domain}"
+    error "  正确格式如: api.example.com, sub.domain.co"
+    return 1
+  fi
+  return 0
+}
+
+sed_escape() {
+  printf '%s' "$1" | sed 's/[&/\]/\\&/g'
+}
+
 detect_nginx() {
   command -v nginx &>/dev/null && nginx -v 2>&1 | grep -q nginx
+}
+
+detect_nginx_paths() {
+  if [ -d "${NGINX_ENABLED_DIR}" ]; then
+    NGINX_METAPI_CONF="${NGINX_AVAILABLE_DIR}/metapi.conf"
+    NGINX_METAPI_ENABLED="${NGINX_ENABLED_DIR}/metapi.conf"
+  elif [ -d "${NGINX_CONF_D_DIR}" ]; then
+    NGINX_METAPI_CONF="${NGINX_CONF_D_DIR}/metapi.conf"
+    NGINX_METAPI_ENABLED=""
+  else
+    mkdir -p "${NGINX_AVAILABLE_DIR}" "${NGINX_ENABLED_DIR}"
+    NGINX_METAPI_CONF="${NGINX_AVAILABLE_DIR}/metapi.conf"
+    NGINX_METAPI_ENABLED="${NGINX_ENABLED_DIR}/metapi.conf"
+    if [ -f /etc/nginx/nginx.conf ] && ! grep -q 'include.*sites-enabled' /etc/nginx/nginx.conf 2>/dev/null; then
+      sed -i '/http {/a \    include /etc/nginx/sites-enabled/*;' /etc/nginx/nginx.conf 2>/dev/null || true
+      info "已将 sites-enabled 加入 nginx.conf"
+    fi
+  fi
 }
 
 install_nginx() {
   if detect_nginx; then
     info "Nginx 已安装，直接复用"
+    detect_nginx_paths
     return 0
   fi
   info "安装 Nginx..."
   apt-get install -y -qq nginx 2>&1 || { error "Nginx 安装失败"; return 1; }
   systemctl enable --now nginx 2>/dev/null || true
+  detect_nginx_paths
   success "Nginx 安装完成"
+}
+
+install_certbot() {
+  if command -v certbot &>/dev/null; then
+    info "Certbot 已安装"
+    return 0
+  fi
+
+  info "安装 Certbot + Nginx 插件（Let's Encrypt 客户端）..."
+  apt-get update -qq
+  apt-get install -y -qq certbot python3-certbot-nginx 2>&1 || { error "Certbot 安装失败"; return 1; }
+
+  if command -v certbot &>/dev/null; then
+    success "Certbot 安装完成"
+    if systemctl list-unit-files certbot.timer &>/dev/null 2>&1; then
+      systemctl enable --now certbot.timer 2>/dev/null || true
+      info "Certbot 自动续期定时器已启用"
+    fi
+  else
+    error "Certbot 安装失败"
+    return 1
+  fi
 }
 
 reload_nginx() {
@@ -333,18 +598,46 @@ reload_nginx() {
 
 remove_nginx_metapi_conf() {
   local found=0
-  if [ -f "${NGINX_METAPI_ENABLED}" ]; then
-    warn "发现 Metapi Nginx 配置（已启用），正在移除..."
-    rm -f "${NGINX_METAPI_ENABLED}"
-    found=1
+  if [ -n "${NGINX_METAPI_ENABLED}" ] && [ -f "${NGINX_METAPI_ENABLED}" ]; then
+    if [ -L "${NGINX_METAPI_ENABLED}" ] && [ "$(readlink -f "${NGINX_METAPI_ENABLED}" 2>/dev/null)" = "${NGINX_METAPI_CONF}" ]; then
+      warn "发现 Metapi Nginx 配置（已启用），正在移除..."
+      rm -f "${NGINX_METAPI_ENABLED}"
+      found=1
+    else
+      warn "发现同名 Nginx enabled 配置但不是 Metapi 链接，跳过删除: ${NGINX_METAPI_ENABLED}"
+    fi
   fi
   if [ -f "${NGINX_METAPI_CONF}" ]; then
-    warn "发现 Metapi Nginx 配置文件，正在移除..."
-    rm -f "${NGINX_METAPI_CONF}"
-    found=1
+    if nginx_conf_managed; then
+      warn "发现 Metapi Nginx 配置文件，正在移除..."
+      rm -f "${NGINX_METAPI_CONF}"
+      found=1
+    else
+      warn "发现同名 Nginx 配置但缺少 Metapi 管理标记，跳过删除: ${NGINX_METAPI_CONF}"
+    fi
   fi
   if [ "$found" -eq 1 ]; then
     reload_nginx
+  fi
+}
+
+remove_ssl_cert() {
+  local domain="$1"
+  if [ -z "$domain" ]; then
+    return 0
+  fi
+
+  local marker_domain; marker_domain=$(get_marker_value "domain")
+  local marker_cert; marker_cert=$(get_marker_value "cert_managed_by_script")
+  if [ "$marker_domain" != "$domain" ] || [ "$marker_cert" != "yes" ]; then
+    warn "SSL 证书 ${domain} 未标记为本脚本创建，跳过删除以免影响其他站点"
+    return 0
+  fi
+
+  if [ -d "${NGINX_SSL_DIR}/${domain}" ] && command -v certbot &>/dev/null; then
+    info "删除 SSL 证书（${domain}）..."
+    certbot delete --cert-name "$domain" --non-interactive 2>/dev/null || true
+    success "SSL 证书已删除"
   fi
 }
 
@@ -353,33 +646,41 @@ configure_nginx_proxy() {
 
   info "写入 Nginx 反向代理配置..."
 
+  if [ -f "${NGINX_METAPI_CONF}" ] && ! nginx_conf_managed; then
+    error "Nginx 配置 ${NGINX_METAPI_CONF} 已存在且不属于本脚本，拒绝覆盖"
+    return 1
+  fi
+
   if detect_nginx && nginx -T 2>/dev/null | grep -qP "^\s+listen\s+${listen_port}\b"; then
     warn "端口 ${listen_port} 已在其他 Nginx 配置中使用（仅提醒，继续写入）"
   fi
 
-  {
-    echo "server {"
-    echo "    listen ${listen_port};"
-    if [ -n "$domain" ]; then
-      echo "    server_name ${domain};"
-    else
-      echo "    server_name _;"
-    fi
-    echo ""
-    echo "    location / {"
-    echo "        proxy_pass http://127.0.0.1:${upstream_port};"
-    echo "        proxy_set_header Host \$host;"
-    echo "        proxy_set_header X-Real-IP \$remote_addr;"
-    echo "        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;"
-    echo "        proxy_set_header X-Forwarded-Proto \$scheme;"
-    echo "        proxy_read_timeout 300s;"
-    echo "        proxy_buffering off;"
-    echo "        proxy_cache off;"
-    echo "    }"
-    echo "}"
-  } > "${NGINX_METAPI_CONF}"
+  cat > "${NGINX_METAPI_CONF}" << EOF
+server {
+    # ${MANAGED_MARKER}
+    listen ${listen_port};
+    server_name ${domain:-_};
 
-  ln -sf "${NGINX_METAPI_CONF}" "${NGINX_METAPI_ENABLED}"
+    location / {
+        proxy_pass http://127.0.0.1:${upstream_port};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_buffering off;
+        proxy_cache off;
+    }
+}
+EOF
+
+  if [ -n "${NGINX_METAPI_ENABLED}" ]; then
+    ln -sf "${NGINX_METAPI_CONF}" "${NGINX_METAPI_ENABLED}"
+  fi
 
   if nginx -t 2>/dev/null; then
     reload_nginx
@@ -393,154 +694,168 @@ configure_nginx_proxy() {
 
 setup_nginx_ssl() {
   local domain="$1" ssl_port="$2" upstream_port="$3" email="$4"
-  local challenge_dir="/var/www/metapi-challenge"
 
   info "配置 SSL 证书..."
 
-  if [ -d "${NGINX_SSL_DIR}/${domain}" ]; then
-    info "SSL 证书已存在: ${NGINX_SSL_DIR}/${domain}"
-    return 0
-  fi
-
-  mkdir -p "$challenge_dir"
-
-  {
-    echo "server {"
-    echo "    listen 80;"
-    echo "    server_name ${domain};"
-    echo ""
-    echo "    location /.well-known/acme-challenge/ {"
-    echo "        root ${challenge_dir};"
-    echo "    }"
-    echo ""
-    echo "    location / {"
-    echo "        proxy_pass http://127.0.0.1:${upstream_port};"
-    echo "        proxy_set_header Host \$host;"
-    echo "        proxy_set_header X-Real-IP \$remote_addr;"
-    echo "        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;"
-    echo "        proxy_set_header X-Forwarded-Proto \$scheme;"
-    echo "        proxy_read_timeout 300s;"
-    echo "        proxy_buffering off;"
-    echo "        proxy_cache off;"
-    echo "    }"
-    echo "}"
-  } > "${NGINX_METAPI_CONF}"
-
-  ln -sf "${NGINX_METAPI_CONF}" "${NGINX_METAPI_ENABLED}"
-
-  if ! nginx -t 2>/dev/null; then
-    error "Nginx 配置测试失败"
-    nginx -t 2>&1
-    return 1
-  fi
-  reload_nginx
-
-  if ! command -v certbot &>/dev/null; then
-    info "安装 certbot..."
-    apt-get install -y -qq certbot 2>&1 || { error "certbot 安装失败"; return 1; }
-  fi
-
-  info "申请 Let's Encrypt 证书..."
-  local certbot_args="certonly --webroot -w ${challenge_dir} -d ${domain} --non-interactive --agree-tos"
-  [ -n "$email" ] && certbot_args="$certbot_args -m ${email}" || certbot_args="$certbot_args --register-unsafely-without-email"
-
-  if ! certbot $certbot_args 2>&1; then
-    warn "证书申请失败，可稍后手动执行: certbot certonly --webroot -w ${challenge_dir} -d ${domain}"
+  if [ -f "${NGINX_METAPI_CONF}" ] && ! nginx_conf_managed; then
+    error "Nginx 配置 ${NGINX_METAPI_CONF} 已存在且不属于本脚本，拒绝覆盖"
     return 1
   fi
 
-  success "SSL 证书申请成功"
+  if ! validate_domain_dns "$domain"; then
+    warn "域名 DNS 验证未通过，证书申请可能失败"
+  fi
 
-  local ssl_cert="/etc/letsencrypt/live/${domain}/fullchain.pem"
-  local ssl_key="/etc/letsencrypt/live/${domain}/privkey.pem"
-
-  if [ ! -f "$ssl_cert" ]; then
-    error "证书文件未找到: ${ssl_cert}"
+  if ! check_port_80_for_ssl; then
     return 1
   fi
 
-  info "写入 Nginx SSL 配置（端口 ${ssl_port}）..."
+  local cert_dir="${NGINX_SSL_DIR}/${domain}"
+  local cert_already_exists=false
+  if [ -d "$cert_dir" ] && [ -f "${cert_dir}/fullchain.pem" ] && [ -f "${cert_dir}/privkey.pem" ]; then
+    info "SSL 证书已存在: ${cert_dir}，跳过证书申请"
+    cert_already_exists=true
+  fi
 
-  {
-    echo "server {"
-    echo "    listen 80;"
-    echo "    server_name ${domain};"
-    echo "    return 301 https://\$host:${ssl_port}\$request_uri;"
-    echo "}"
-    echo ""
-    echo "server {"
-    echo "    listen ${ssl_port} ssl http2;"
-    echo "    server_name ${domain};"
-    echo ""
-    echo "    ssl_certificate ${ssl_cert};"
-    echo "    ssl_certificate_key ${ssl_key};"
-    echo ""
-    echo "    location / {"
-    echo "        proxy_pass http://127.0.0.1:${upstream_port};"
-    echo "        proxy_set_header Host \$host;"
-    echo "        proxy_set_header X-Real-IP \$remote_addr;"
-    echo "        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;"
-    echo "        proxy_set_header X-Forwarded-Proto \$scheme;"
-    echo "        proxy_read_timeout 300s;"
-    echo "        proxy_buffering off;"
-    echo "        proxy_cache off;"
-    echo "    }"
-    echo "}"
-  } > "${NGINX_METAPI_CONF}"
+  if [ "$cert_already_exists" = "false" ]; then
+    info "写入 Nginx HTTP 配置..."
 
-  ln -sf "${NGINX_METAPI_CONF}" "${NGINX_METAPI_ENABLED}"
+    cat > "${NGINX_METAPI_CONF}" << EOF
+server {
+    # ${MANAGED_MARKER}
+    listen 80;
+    server_name ${domain};
 
-  if nginx -t 2>/dev/null; then
+    location / {
+        proxy_pass http://127.0.0.1:${upstream_port};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_buffering off;
+        proxy_cache off;
+    }
+}
+EOF
+
+    if [ -n "${NGINX_METAPI_ENABLED}" ]; then
+      ln -sf "${NGINX_METAPI_CONF}" "${NGINX_METAPI_ENABLED}"
+    fi
+
+    if ! nginx -t 2>/dev/null; then
+      error "Nginx 配置测试失败"
+      nginx -t 2>&1
+      return 1
+    fi
     reload_nginx
-    success "SSL 配置完成，可通过 ${CYAN}https://${domain}:${ssl_port}${NC} 访问"
-  else
-    error "Nginx SSL 配置测试失败"
-    nginx -t 2>&1
-    return 1
+
+    install_certbot || return 1
+
+    info "申请 Let's Encrypt 证书（certbot --nginx 模式）..."
+    local certbot_args="--nginx -d ${domain} --non-interactive --agree-tos --redirect"
+    [ -n "$email" ] && certbot_args="${certbot_args} --email ${email}" || certbot_args="${certbot_args} --register-unsafely-without-email"
+
+    if ! certbot $certbot_args 2>&1; then
+      error "证书申请失败"
+      warn "可稍后手动执行: certbot --nginx -d ${domain}"
+      warn "常见原因:"
+      warn "  1. 域名未正确解析到此服务器"
+      warn "  2. 80 端口被防火墙拦截（Let's Encrypt 验证需要）"
+      warn "  3. 80 端口被其他服务占用"
+      return 1
+    fi
+
+    success "SSL 证书申请成功"
+    CERT_MANAGED_BY_SCRIPT="yes"
   fi
+
+  if [ "$cert_already_exists" = "false" ] && [ "${ssl_port}" != "443" ] && [ -n "${ssl_port}" ]; then
+    info "将 HTTPS 端口从 443 修改为 ${ssl_port}..."
+    sed -i "s/listen 443 ssl/listen ${ssl_port} ssl/g" "${NGINX_METAPI_CONF}" 2>/dev/null || true
+    sed -i "s/listen \[::\]:443 ssl/listen [::]:${ssl_port} ssl/g" "${NGINX_METAPI_CONF}" 2>/dev/null || true
+    sed -i "s/return 301 https:\\\/\\\/\\\$host:443/return 301 https:\\\/\\\/\\\$host:${ssl_port}/g" "${NGINX_METAPI_CONF}" 2>/dev/null || true
+    if nginx -t 2>/dev/null; then
+      reload_nginx
+      info "HTTPS 端口已修改为 ${ssl_port}"
+    else
+      error "修改 HTTPS 端口后 Nginx 配置测试失败，回滚为 443"
+      sed -i "s/listen ${ssl_port} ssl/listen 443 ssl/g" "${NGINX_METAPI_CONF}" 2>/dev/null || true
+      sed -i "s/listen \[::\]:${ssl_port} ssl/listen [::]:443 ssl/g" "${NGINX_METAPI_CONF}" 2>/dev/null || true
+      nginx -t 2>/dev/null && reload_nginx || true
+      ssl_port="443"
+    fi
+  fi
+
+  echo ""
+  success "SSL 配置完成"
+  if [ "${ssl_port}" = "443" ] || [ -z "${ssl_port}" ]; then
+    echo -e "  访问地址: ${CYAN}https://${domain}${NC}"
+  else
+    echo -e "  访问地址: ${CYAN}https://${domain}:${ssl_port}${NC}"
+  fi
+  info "HTTP 请求将自动重定向到 HTTPS"
+  info "SSL 证书会由 Certbot 自动续期"
 }
 
 detect_nginx_metapi_conf() {
-  [ -f "${NGINX_METAPI_CONF}" ] || [ -f "${NGINX_METAPI_ENABLED}" ]
+  [ -f "${NGINX_METAPI_CONF}" ] || { [ -n "${NGINX_METAPI_ENABLED}" ] && [ -f "${NGINX_METAPI_ENABLED}" ]; }
 }
 
 install_node() {
-  if command -v node &>/dev/null; then
-    local major; major=$(node -v | sed 's/v//' | cut -d. -f1)
-    if [ "$major" -ge "$NODE_MAJOR" ]; then
-      success "Node.js $(node -v) 已安装"
-      return 0
-    fi
-    warn "Node.js $(node -v) 版本过低，需要 ${NODE_MAJOR}+"
-  fi
-
-  info "安装 Node.js ${NODE_MAJOR}..."
-
-  local retry=0
-  while [ $retry -lt 3 ]; do
-    if curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - 2>&1; then break; fi
-    retry=$((retry + 1)); sleep 3
-  done
-
-  if [ $retry -lt 3 ] && apt-get install -y -qq nodejs 2>&1; then
-    success "Node.js $(node -v) 安装成功"
+  local existing_node=""
+  if existing_node=$(get_node_path 2>/dev/null); then
+    success "Node.js $(${existing_node} -v) 可用 (${existing_node})"
     return 0
   fi
 
-  warn "NodeSource 安装失败，使用官方二进制..."
+  info "安装 Metapi 专用 Node.js ${NODE_MAJOR} 运行时..."
   local arch; arch=$(detect_arch)
   local node_arch="$arch"
   [ "$arch" = "amd64" ] && node_arch="x64"
+  [ "$arch" = "arm64" ] && node_arch="arm64"
 
-  local node_ver="${NODE_MAJOR}.0.0"
+  if [ "$node_arch" = "armv7l" ]; then
+    error "当前架构暂不支持自动安装专用 Node.js 运行时，请手动安装 Node.js ${NODE_MAJOR}+"
+    return 1
+  fi
+
+  local node_ver
+  node_ver=$(curl -fsSL --connect-timeout 15 --max-time 30 https://nodejs.org/dist/index.tab 2>/dev/null | awk -v major="v${NODE_MAJOR}." '$1 ~ major {print $1; exit}' | sed 's/^v//')
+  [ -z "$node_ver" ] && node_ver="${NODE_MAJOR}.0.0"
+
   local node_url="https://nodejs.org/dist/v${node_ver}/node-v${node_ver}-linux-${node_arch}.tar.xz"
+  local tmp_dir; tmp_dir=$(mktemp -d)
+  local tmp_file="${tmp_dir}/node.tar.xz"
 
-  if curl -fsSL "$node_url" | tar -xJ -C /usr/local --strip-components=1 2>&1; then
-    success "Node.js $(node -v) 安装成功（官方二进制）"
+  if curl -fSL --connect-timeout 30 --max-time 300 --progress-bar -o "$tmp_file" "$node_url" 2>&1; then
+    rm -rf "${NODE_RUNTIME_DIR}"
+    mkdir -p "${NODE_RUNTIME_DIR}"
+    if tar -xJf "$tmp_file" -C "${NODE_RUNTIME_DIR}" --strip-components=1 2>&1; then
+      rm -rf "${tmp_dir}"
+      success "Node.js $(${NODE_BIN} -v) 安装完成（专用运行时，不修改系统 Node）"
+      return 0
+    fi
+  fi
+
+  rm -rf "${tmp_dir}"
+
+  if command -v node &>/dev/null; then
+    local major; major=$(node -v | sed 's/v//' | cut -d. -f1)
+    if [ "$major" -lt "$NODE_MAJOR" ]; then
+      error "系统 Node.js $(node -v) 版本过低，且专用运行时安装失败"
+      error "为避免影响其他应用，本脚本不会修改系统 Node.js 或 apt 源"
+      return 1
+    fi
+    success "使用系统 Node.js $(node -v)"
     return 0
   fi
 
-  error "Node.js 安装失败，请手动安装 Node.js ${NODE_MAJOR}+"
+  error "Node.js 专用运行时安装失败，请检查网络或手动安装 Node.js ${NODE_MAJOR}+"
   return 1
 }
 
@@ -575,43 +890,21 @@ pre_install_cleanup() {
 
   local found_residual=0
 
-  if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
-    warn "发现正在运行的 ${SERVICE_NAME} 服务，正在停止..."
-    systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
+  if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null || [ -f "${SERVICE_FILE}" ]; then
+    safe_remove_service
     found_residual=1
   fi
 
-  if [ -f "${SERVICE_FILE}" ]; then
-    warn "发现残留 systemd 服务文件，正在清理..."
-    systemctl disable "${SERVICE_NAME}" 2>/dev/null || true
-    rm -f "${SERVICE_FILE}"
-    systemctl daemon-reload 2>/dev/null || true
-    found_residual=1
-  fi
-
-  if [ -f "${SERVICE_FILE}.bak" ] || [ -f "/etc/systemd/system/${SERVICE_NAME}.service.bak" ]; then
+  if [ -f "${SERVICE_FILE}.bak" ] || [ -f "/etc/systemd/system/${SERVICE_NAME}.service.bak" ] || \
+     [ -f "${SERVICE_FILE}"~ ] || [ -f "/etc/systemd/system/${SERVICE_NAME}.service~" ]; then
     warn "发现残留服务备份文件，正在清理..."
-    rm -f "${SERVICE_FILE}.bak" "/etc/systemd/system/${SERVICE_NAME}.service.bak"
+    rm -f "${SERVICE_FILE}.bak" "/etc/systemd/system/${SERVICE_NAME}.service.bak" \
+          "${SERVICE_FILE}"~ "/etc/systemd/system/${SERVICE_NAME}.service~"
     found_residual=1
   fi
 
-  if id "${APP_USER}" &>/dev/null; then
-    warn "发现残留用户 '${APP_USER}'，正在清理..."
-    userdel "${APP_USER}" 2>/dev/null || true
-    found_residual=1
-  fi
-
-  if [ -f "${SWAP_FILE}" ]; then
-    warn "发现残留 Swap 文件，正在清理..."
-    swapoff "${SWAP_FILE}" 2>/dev/null || true
-    rm -f "${SWAP_FILE}"
-    sed -i "\|${SWAP_FILE}|d" /etc/fstab 2>/dev/null || true
-    found_residual=1
-  fi
-
-  if [ -f "${SYSCTL_CONF}" ]; then
-    warn "发现残留 sysctl 配置，正在清理..."
-    rm -f "${SYSCTL_CONF}"
+  if [ -f "${SWAP_FILE}" ] || [ -f "${SYSCTL_CONF}" ] || [ -f "${SWAP_FLAG}" ]; then
+    safe_remove_swap
     found_residual=1
   fi
 
@@ -621,6 +914,12 @@ pre_install_cleanup() {
   fi
 
   if [ -d "${APP_DIR}" ]; then
+    if [ ! -f "${MARKER_FILE}" ]; then
+      error "${APP_DIR} 已存在但缺少 Metapi 安装标记，拒绝清理以免误删其他数据"
+      error "请确认目录归属后手动处理，或备份后删除该目录再重试"
+      return 1
+    fi
+
     local has_data="no"
     [ -d "${APP_DIR}/data" ] && [ "$(ls -A "${APP_DIR}/data" 2>/dev/null)" ] && has_data="yes"
     local has_env="no"
@@ -628,15 +927,17 @@ pre_install_cleanup() {
 
     if [ "$has_data" = "yes" ] || [ "$has_env" = "yes" ]; then
       info "发现已有配置/数据，将保留 .env 和 data/ 目录"
+      local tmpdir; tmpdir=$(mktemp -d)
       if [ -f "${ENV_FILE}" ]; then
-        cp -a "${ENV_FILE}" "/tmp/metapi_env_cleanup_$$"
+        cp -a "${ENV_FILE}" "${tmpdir}/env_backup"
       fi
       if [ -d "${DATA_DIR}" ]; then
-        cp -a "${DATA_DIR}" "/tmp/metapi_data_cleanup_$$"
+        cp -a "${DATA_DIR}" "${tmpdir}/data_backup"
       fi
       rm -rf "${APP_DIR:?}"/* "${APP_DIR}"/.[!.]* 2>/dev/null || true
-      [ -f "/tmp/metapi_env_cleanup_$$" ] && mv "/tmp/metapi_env_cleanup_$$" "${ENV_FILE}"
-      [ -d "/tmp/metapi_data_cleanup_$$" ] && mv "/tmp/metapi_data_cleanup_$$" "${APP_DIR}/data"
+      [ -f "${tmpdir}/env_backup" ] && mv "${tmpdir}/env_backup" "${ENV_FILE}"
+      [ -d "${tmpdir}/data_backup" ] && mv "${tmpdir}/data_backup" "${APP_DIR}/data"
+      rm -rf "${tmpdir}"
       found_residual=1
     else
       warn "发现残留安装目录，正在清理..."
@@ -724,6 +1025,11 @@ download_prebuilt() {
     return 1
   fi
 
+  local download_hash; download_hash=$(sha256sum "$tmp_file" 2>/dev/null | cut -d' ' -f1 || true)
+  if [ -n "$download_hash" ]; then
+    info "下载文件 SHA256: ${download_hash}"
+  fi
+
   info "解压..."
   if ! tar -xzf "$tmp_file" -C "$tmp_dir" 2>&1; then
     error "解压失败，文件可能已损坏"
@@ -767,14 +1073,14 @@ download_prebuilt() {
 create_user() {
   if id "${APP_USER}" &>/dev/null; then
     info "用户 '${APP_USER}' 已存在"
-    local home; home=$(getent passwd "${APP_USER}" | cut -d: -f6)
-    [ "$home" != "${APP_DIR}" ] && usermod -d "${APP_DIR}" "${APP_USER}"
+    USER_CREATED_BY_SCRIPT="no"
     return 0
   fi
 
   info "创建隔离用户 '${APP_USER}'..."
-  useradd -r -m -s /bin/bash -d "${APP_DIR}" "${APP_USER}"
+  useradd -r -m -U -s /bin/bash -d "${APP_DIR}" "${APP_USER}"
   passwd -l "${APP_USER}" 2>/dev/null || true
+  USER_CREATED_BY_SCRIPT="yes"
   success "用户创建完成"
 }
 
@@ -783,10 +1089,12 @@ configure_env() {
     info ".env 已存在，更新配置..."
 
     if [ -n "${CLI_AUTH_TOKEN}" ]; then
-      sed -i "s|^AUTH_TOKEN=.*|AUTH_TOKEN=${CLI_AUTH_TOKEN}|" "${ENV_FILE}"
+      local escaped_token; escaped_token=$(sed_escape "${CLI_AUTH_TOKEN}")
+      sed -i "s|^AUTH_TOKEN=.*|AUTH_TOKEN=${escaped_token}|" "${ENV_FILE}"
     fi
     if [ -n "${CLI_PROXY_TOKEN}" ]; then
-      sed -i "s|^PROXY_TOKEN=.*|PROXY_TOKEN=${CLI_PROXY_TOKEN}|" "${ENV_FILE}"
+      local escaped_proxy; escaped_proxy=$(sed_escape "${CLI_PROXY_TOKEN}")
+      sed -i "s|^PROXY_TOKEN=.*|PROXY_TOKEN=${escaped_proxy}|" "${ENV_FILE}"
     fi
     sed -i "s|^PORT=.*|PORT=${ACTUAL_PORT}|" "${ENV_FILE}"
 
@@ -809,7 +1117,6 @@ DATA_DIR=${APP_DIR}/data
 CHECKIN_CRON=0 8 * * *
 BALANCE_REFRESH_CRON=0 * * * *
 TZ=Asia/Shanghai
-NODE_OPTIONS=--max-old-space-size=${mem_limit}
 UPDATE_CHECK_URL=${RELEASE_API}
 EOF
 
@@ -845,9 +1152,15 @@ configure_swap() {
   chmod 600 "${SWAP_FILE}"
   mkswap "${SWAP_FILE}" >/dev/null 2>&1
   swapon "${SWAP_FILE}" 2>/dev/null || true
-  grep -q "${SWAP_FILE}" /etc/fstab || echo "${SWAP_FILE} none swap sw 0 0" >> /etc/fstab
+  grep -q "${SWAP_FILE}" /etc/fstab || echo "${SWAP_FILE} none swap sw 0 0 # ${MANAGED_BY}" >> /etc/fstab
+  touch "${SWAP_FLAG}"
   sysctl vm.swappiness=10 >/dev/null 2>&1
-  grep -q "vm.swappiness" "${SYSCTL_CONF}" 2>/dev/null || echo "vm.swappiness=10" > "${SYSCTL_CONF}"
+  if ! grep -q "vm.swappiness" "${SYSCTL_CONF}" 2>/dev/null; then
+    {
+      echo "# ${MANAGED_MARKER}"
+      echo "vm.swappiness=10"
+    } > "${SYSCTL_CONF}"
+  fi
 
   success "Swap 配置完成 (1GB)"
 }
@@ -855,19 +1168,27 @@ configure_swap() {
 install_systemd_service() {
   info "配置 systemd 服务..."
 
-  local node_path; node_path=$(which node)
+  local node_path=""
+  if ! node_path=$(get_node_path 2>/dev/null); then
+    error "找不到可用的 Node.js 运行时"
+    return 1
+  fi
   local mem_limit; mem_limit=$(get_memory_limit)
+  local mem_max; mem_max=$(get_memory_max)
+  local cpu_quota; cpu_quota=$(get_cpu_quota)
+  local app_group; app_group=$(app_group_name)
 
   cat > "${SERVICE_FILE}" << EOF
 [Unit]
 Description=Metapi - AI API Aggregation Gateway
+# ${MANAGED_MARKER}
 After=network.target
 ConditionPathExists=${APP_DIR}/dist/server/index.js
 
 [Service]
 Type=simple
 User=${APP_USER}
-Group=${APP_USER}
+Group=${app_group}
 WorkingDirectory=${APP_DIR}
 
 Environment=NODE_ENV=production
@@ -890,7 +1211,20 @@ ProtectSystem=strict
 ReadWritePaths=${DATA_DIR} ${APP_DIR}/drizzle
 ProtectHome=true
 PrivateTmp=true
+PrivateDevices=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
 LimitNOFILE=65536
+
+MemoryMax=${mem_max}M
+MemoryHigh=${mem_limit}M
+CPUQuota=${cpu_quota}
 
 [Install]
 WantedBy=multi-user.target
@@ -903,8 +1237,9 @@ EOF
 
 set_permissions() {
   info "设置文件权限..."
+  local app_group; app_group=$(app_group_name)
   mkdir -p "${APP_DIR}/data"
-  chown -R "${APP_USER}:${APP_USER}" "${APP_DIR}"
+  chown -R "${APP_USER}:${app_group}" "${APP_DIR}"
   chmod 700 "${APP_DIR}"
   chmod 600 "${APP_DIR}/.env" 2>/dev/null
   chmod 700 "${APP_DIR}/data"
@@ -917,21 +1252,37 @@ write_marker() {
     current_version=$(grep '^version=' "${APP_DIR}/.build-info" 2>/dev/null | cut -d= -f2 || echo "unknown")
   fi
 
+  local user_created="${USER_CREATED_BY_SCRIPT}"
+  if [ "$user_created" = "unknown" ]; then
+    user_created=$(get_marker_value "user_created_by_script")
+    [ -z "$user_created" ] && user_created="no"
+  fi
+
+  local cert_managed="${CERT_MANAGED_BY_SCRIPT}"
+  if [ "$cert_managed" != "yes" ]; then
+    local old_cert_managed; old_cert_managed=$(get_marker_value "cert_managed_by_script")
+    [ "$old_cert_managed" = "yes" ] && cert_managed="yes"
+  fi
+
   cat > "${MARKER_FILE}" << EOF
+${MANAGED_MARKER}
 version=${MARKER_VERSION}
 app_version=${current_version}
 install_time=$(date '+%Y-%m-%d %H:%M:%S')
 node_version=$(node -v 2>/dev/null || echo "unknown")
 arch=$(detect_arch)
 user=${APP_USER}
+user_created_by_script=${user_created}
 dir=${APP_DIR}
 service=${SERVICE_FILE}
 port=${ACTUAL_PORT}
 domain=${DOMAIN_NAME}
 listen_port=${DOMAIN_LISTEN_PORT}
 cert_email=${CERTBOT_EMAIL}
+cert_managed_by_script=${cert_managed}
 EOF
-  chown "${APP_USER}:${APP_USER}" "${MARKER_FILE}" 2>/dev/null
+  local app_group; app_group=$(app_group_name)
+  chown "${APP_USER}:${app_group}" "${MARKER_FILE}" 2>/dev/null
 }
 
 start_service() {
@@ -941,7 +1292,8 @@ start_service() {
   local retry=0
   while [ $retry -lt 30 ]; do
     if systemctl is-active "${SERVICE_NAME}" &>/dev/null; then
-      if curl -sf --connect-timeout 2 "http://127.0.0.1:${ACTUAL_PORT}" >/dev/null 2>&1; then
+      if curl -sf --connect-timeout 2 "http://127.0.0.1:${ACTUAL_PORT}/api/ping" >/dev/null 2>&1 || \
+         curl -sf --connect-timeout 2 "http://127.0.0.1:${ACTUAL_PORT}" >/dev/null 2>&1; then
         success "服务启动成功 (端口 ${ACTUAL_PORT} 已响应)"
         return 0
       fi
@@ -1126,13 +1478,9 @@ show_interactive_menu() {
           if [ "$is_installed" = "yes" ]; then
             deregister_trap
             echo -e "  ${YELLOW}卸载将保留 /opt/metapi/data 目录下的数据${NC}"
-            prompt_read "  确认卸载？[y/N]: " confirm
+            do_uninstall
             echo ""
-            if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
-              do_uninstall
-              echo ""
-              prompt_read "  按回车键返回菜单" _
-            fi
+            prompt_read "  按回车键返回菜单" _
             register_trap
           fi
           ;;
@@ -1140,13 +1488,9 @@ show_interactive_menu() {
           if [ "$is_installed" = "yes" ]; then
             deregister_trap
             echo -e "  ${RED}⚠ 完整卸载将删除所有数据，不可恢复！${NC}"
-            prompt_read "  确认完整卸载？[y/N]: " confirm
+            do_uninstall_all
             echo ""
-            if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
-              do_uninstall_all
-              echo ""
-              prompt_read "  按回车键返回菜单" _
-            fi
+            prompt_read "  按回车键返回菜单" _
             register_trap
           fi
           ;;
@@ -1244,7 +1588,16 @@ show_status_info() {
   fi
 
   local ip_addr; ip_addr=$(hostname -I 2>/dev/null | awk '{print $1}' || echo '服务器IP')
-  echo -e "  访问地址:  ${CYAN}http://${ip_addr}:${configured_port}${NC}"
+  if [ -n "$mk_domain" ] && [ -d "${NGINX_SSL_DIR}/${mk_domain}" ]; then
+    if [ -n "$mk_listen_port" ] && [ "$mk_listen_port" != "443" ]; then
+      echo -e "  域名访问:  ${CYAN}https://${mk_domain}:${mk_listen_port}${NC}"
+    else
+      echo -e "  域名访问:  ${CYAN}https://${mk_domain}${NC}"
+    fi
+  elif [ -n "$mk_domain" ] && [ -n "$mk_listen_port" ]; then
+    echo -e "  域名访问:  ${CYAN}http://${mk_domain}:${mk_listen_port}${NC}"
+  fi
+  echo -e "  IP 直连:    ${CYAN}http://${ip_addr}:${configured_port}${NC}"
 
   local app_size; app_size=$(du -sh "${APP_DIR}" 2>/dev/null | awk '{print $1}' || echo "未知")
   echo -e "  磁盘占用:  ${BOLD}${app_size}${NC}"
@@ -1319,25 +1672,58 @@ _installation_wizard() {
   echo -e "  ${YELLOW}域名配置（可选，留空则跳过）${NC}"
   prompt_read "  第四步：输入域名（如 api.example.com）: " input_domain
   if [ -n "$input_domain" ]; then
-    wizard_domain="$input_domain"
-    while true; do
-      local default_lp="443"
-      prompt_read "  外部访问端口 [${default_lp}]: " input_lp
-      wizard_listen_port="${input_lp:-$default_lp}"
-      if check_port_conflict "$wizard_listen_port"; then
-        break
+    if ! validate_domain_format "$input_domain"; then
+      echo -e "  ${YELLOW}跳过域名配置${NC}"
+      wizard_domain=""
+      wizard_listen_port=""
+      wizard_cert_email=""
+      echo -e "  ${DIM}跳过域名配置，仅 IP 访问${NC}"
+    else
+      wizard_domain="$input_domain"
+
+      if ! validate_domain_dns "$wizard_domain"; then
+        echo -e "  ${YELLOW}DNS 验证未通过，SSL 证书申请可能失败${NC}"
+        prompt_read "  是否继续？[y/N]: " dns_continue
+        if [ "$dns_continue" != "y" ] && [ "$dns_continue" != "Y" ]; then
+          wizard_domain=""
+          echo -e "  ${DIM}跳过域名配置，仅 IP 访问${NC}"
+        fi
       fi
-      prompt_read "  是否重新输入端口？[Y/n]: " retry_port
-      if [ "$retry_port" = "n" ] || [ "$retry_port" = "N" ]; then
-        break
+
+      if [ -n "$wizard_domain" ]; then
+        while true; do
+          local default_lp="443"
+          prompt_read "  外部访问端口 [${default_lp}]: " input_lp
+          wizard_listen_port="${input_lp:-$default_lp}"
+          if check_port_conflict "$wizard_listen_port"; then
+            break
+          fi
+          prompt_read "  是否重新输入端口？[Y/n]: " retry_port
+          if [ "$retry_port" = "n" ] || [ "$retry_port" = "N" ]; then
+            break
+          fi
+        done
+        echo ""
+        prompt_read "  证书邮箱（Let's Encrypt 通知，留空不申请证书）: " wizard_cert_email
+
+        if [ -n "$wizard_cert_email" ]; then
+          if ! check_port_80_for_ssl; then
+            echo -e "  ${YELLOW}80 端口不可用，无法申请 SSL 证书${NC}"
+            echo -e "  ${YELLOW}将仅配置 Nginx HTTP 反向代理，部署后可在主菜单 10 配置 SSL${NC}"
+            wizard_cert_email=""
+          fi
+        fi
+
+        echo ""
+        echo -e "  ${GREEN}✓ 域名配置完成:${NC}"
+        echo -e "    域名:  ${CYAN}${wizard_domain}:${wizard_listen_port}${NC}"
+        if [ -n "$wizard_cert_email" ]; then
+          echo -e "    SSL:   ${GREEN}将申请 Let's Encrypt 证书${NC}"
+        else
+          echo -e "    证书:  ${YELLOW}未设置（部署后可在主菜单 10 配置）${NC}"
+        fi
       fi
-    done
-    echo ""
-    prompt_read "  证书邮箱（Let's Encrypt 通知，留空不申请证书）: " wizard_cert_email
-    echo ""
-    echo -e "  ${GREEN}✓ 域名配置完成:${NC}"
-    echo -e "    域名:  ${CYAN}${wizard_domain}:${wizard_listen_port}${NC}"
-    [ -n "$wizard_cert_email" ] && echo -e "    邮箱:  ${CYAN}${wizard_cert_email}${NC}" || echo -e "    证书:  ${YELLOW}未设置（部署后可在主菜单 10 配置）${NC}"
+    fi
   else
     wizard_domain=""
     wizard_listen_port=""
@@ -1359,8 +1745,7 @@ _installation_wizard() {
   fi
   echo ""
 
-  prompt_read "  确认开始安装？[Y/n]: " confirm_start
-  if [ "$confirm_start" = "n" ] || [ "$confirm_start" = "N" ]; then
+  if ! confirm_or_skip "  确认开始安装？[Y/n]: "; then
     echo -e "  ${YELLOW}已取消${NC}"
     prompt_read "  按回车键返回主菜单" _
     return
@@ -1426,7 +1811,10 @@ do_install() {
   if ! run_step "启动服务" start_service; then show_failure_report; return 1; fi
 
   if [ -n "$DOMAIN_NAME" ] && [ -n "$CERTBOT_EMAIL" ]; then
-    run_step "配置 Nginx + SSL 证书" _setup_nginx_ssl || true
+    if ! run_step "配置 Nginx + SSL 证书" _setup_nginx_ssl; then
+      warn "SSL 配置失败，将回退为 HTTP 模式"
+      CERTBOT_EMAIL=""
+    fi
   elif [ -n "$DOMAIN_NAME" ] || [ -n "$DOMAIN_LISTEN_PORT" ]; then
     run_step "配置 Nginx 反向代理" _setup_nginx_proxy || true
   fi
@@ -1442,12 +1830,18 @@ do_install() {
   local ip_addr; ip_addr=$(hostname -I 2>/dev/null | awk '{print $1}' || echo '服务器IP')
   if [ -n "$DOMAIN_NAME" ]; then
     if [ -n "$CERTBOT_EMAIL" ]; then
-      echo -e "  访问地址:  ${CYAN}https://${DOMAIN_NAME}:${DOMAIN_LISTEN_PORT}${NC}"
+      if [ "${DOMAIN_LISTEN_PORT}" = "443" ]; then
+        echo -e "  访问地址:  ${CYAN}https://${DOMAIN_NAME}${NC}"
+      else
+        echo -e "  访问地址:  ${CYAN}https://${DOMAIN_NAME}:${DOMAIN_LISTEN_PORT}${NC}"
+      fi
     else
       echo -e "  访问地址:  ${CYAN}http://${DOMAIN_NAME}:${DOMAIN_LISTEN_PORT}${NC}"
     fi
+    echo -e "  IP 直连:   ${CYAN}http://${ip_addr}:${ACTUAL_PORT}${NC}"
+  else
+    echo -e "  访问地址:  ${CYAN}http://${ip_addr}:${ACTUAL_PORT}${NC}"
   fi
-  echo -e "  IP 直连:   ${CYAN}http://${ip_addr}:${DOMAIN_LISTEN_PORT:-$ACTUAL_PORT}${NC}"
   echo -e "  管理令牌:  .env 中的 AUTH_TOKEN"
   echo ""
   echo -e "  ${BOLD}常用命令:${NC}"
@@ -1495,18 +1889,34 @@ _configure_ssl_domain_interactive() {
   if [ -n "$current_domain" ]; then
     echo -e "  当前配置:  ${CYAN}${current_domain}:${current_port:-443}${NC}"
     [ -n "$current_email" ] && echo -e "  当前邮箱:  ${CYAN}${current_email}${NC}"
+    if [ -d "${NGINX_SSL_DIR}/${current_domain}" ]; then
+      echo -e "  SSL 证书:  ${GREEN}✓ 已签发${NC}"
+    fi
     echo ""
-    echo -e "  ${DIM}直接回车保留当前配置，输入新内容修改或清空。${NC}"
+    echo -e "  ${DIM}直接回车保留当前域名，输入新域名修改，留空移除。${NC}"
+    echo ""
+  else
+    echo -e "  ${DIM}此功能将:${NC}"
+    echo -e "  ${DIM}  1. 安装 Nginx（如未安装）${NC}"
+    echo -e "  ${DIM}  2. 创建本项目专属的 Nginx 反向代理配置${NC}"
+    echo -e "  ${DIM}  3. 使用 Let's Encrypt 自动申请 SSL 证书${NC}"
+    echo -e "  ${DIM}  4. 配置 HTTP 自动跳转 HTTPS${NC}"
+    echo ""
+    echo -e "  ${YELLOW}前提条件:${NC}"
+    echo -e "  - 域名已解析到此服务器的 IP 地址"
+    echo -e "  - 服务器 80 端口可从外网访问（Let's Encrypt 验证需要）"
     echo ""
   fi
 
   prompt_read "  域名（留空则移除域名和 SSL 配置）: " new_domain
   if [ -z "$new_domain" ] && [ -n "$current_domain" ]; then
+    remove_ssl_cert "$current_domain"
     DOMAIN_NAME=""
     DOMAIN_LISTEN_PORT=""
     CERTBOT_EMAIL=""
     remove_nginx_metapi_conf
-    echo -e "  ${YELLOW}域名配置已移除，Nginx 配置已清理${NC}"
+    echo -e "  ${YELLOW}域名配置已移除，Nginx 配置和 SSL 证书已清理${NC}"
+    write_marker
     prompt_read "  按回车键返回" _
     return 0
   fi
@@ -1514,7 +1924,29 @@ _configure_ssl_domain_interactive() {
   local set_domain="${new_domain:-$current_domain}"
   [ -z "$set_domain" ] && { prompt_read "  按回车键返回" _; return 0; }
 
+  if ! validate_domain_format "$set_domain"; then
+    prompt_read "  按回车键返回" _
+    return 0
+  fi
+
   DOMAIN_NAME="$set_domain"
+
+  if [ "$set_domain" != "$current_domain" ] && [ -n "$current_domain" ]; then
+    echo ""
+    echo -e "  ${YELLOW}域名已更改: ${current_domain} → ${set_domain}${NC}"
+    remove_ssl_cert "$current_domain"
+    remove_nginx_metapi_conf
+  fi
+
+  if ! validate_domain_dns "$set_domain"; then
+    echo -e "  ${YELLOW}DNS 验证未通过，继续配置可能无法申请证书${NC}"
+    prompt_read "  是否继续？[y/N]: " dns_continue
+    if [ "$dns_continue" != "y" ] && [ "$dns_continue" != "Y" ]; then
+      echo -e "  ${YELLOW}已取消${NC}"
+      prompt_read "  按回车键返回" _
+      return 0
+    fi
+  fi
 
   local default_port="${current_port:-443}"
   while true; do
@@ -1530,13 +1962,31 @@ _configure_ssl_domain_interactive() {
   done
 
   prompt_read "  证书邮箱（用于 Let's Encrypt，留空不申请证书）: " new_email
-  [ -n "$new_email" ] && DOMAIN_LISTEN_PORT="${DOMAIN_LISTEN_PORT:-443}" && CERTBOT_EMAIL="$new_email" || CERTBOT_EMAIL=""
+  if [ -n "$new_email" ]; then
+    CERTBOT_EMAIL="$new_email"
+    DOMAIN_LISTEN_PORT="${DOMAIN_LISTEN_PORT:-443}"
+  else
+    CERTBOT_EMAIL=""
+  fi
+
+  if [ -n "$CERTBOT_EMAIL" ]; then
+    if ! check_port_80_for_ssl; then
+      echo -e "  ${YELLOW}80 端口不可用，无法申请 SSL 证书${NC}"
+      echo -e "  ${YELLOW}将仅配置 Nginx HTTP 反向代理${NC}"
+      CERTBOT_EMAIL=""
+    fi
+  fi
 
   echo ""
   echo -e "  ${BOLD}── 配置摘要 ──${NC}"
   echo -e "  域名:  ${CYAN}${DOMAIN_NAME}${NC}"
   echo -e "  端口:  ${CYAN}${DOMAIN_LISTEN_PORT}${NC}"
-  [ -n "$CERTBOT_EMAIL" ] && echo -e "  邮箱:  ${CYAN}${CERTBOT_EMAIL}${NC}" || echo -e "  证书:  ${YELLOW}未设置${NC}"
+  if [ -n "$CERTBOT_EMAIL" ]; then
+    echo -e "  邮箱:  ${CYAN}${CERTBOT_EMAIL}${NC}"
+    echo -e "  SSL:   ${GREEN}将申请 Let's Encrypt 证书${NC}"
+  else
+    echo -e "  证书:  ${YELLOW}未设置（HTTP 模式）${NC}"
+  fi
   echo ""
   prompt_read "  确认配置？[Y/n]: " confirm
 
@@ -1563,8 +2013,18 @@ _configure_ssl_domain_interactive() {
   echo ""
   if [ -n "$CERTBOT_EMAIL" ] && [ -d "${NGINX_SSL_DIR}/${DOMAIN_NAME}" ]; then
     success "SSL 配置完成，访问: ${CYAN}https://${DOMAIN_NAME}:${DOMAIN_LISTEN_PORT}${NC}"
+    info "SSL 证书会由 Certbot 自动续期"
+    info "证书续期定时任务: systemctl list-timers | grep certbot"
   elif [ -n "$DOMAIN_NAME" ]; then
     success "Nginx 配置完成，访问: ${CYAN}http://${DOMAIN_NAME}:${DOMAIN_LISTEN_PORT}${NC}"
+  fi
+
+  if [ -n "$DOMAIN_LISTEN_PORT" ] && [ "$DOMAIN_LISTEN_PORT" != "80" ] && [ "$DOMAIN_LISTEN_PORT" != "443" ]; then
+    echo ""
+    echo -e "  ${YELLOW}请确保防火墙已开放端口 ${DOMAIN_LISTEN_PORT}:${NC}"
+    if command -v ufw &>/dev/null; then
+      echo -e "    ${CYAN}ufw allow ${DOMAIN_LISTEN_PORT}/tcp${NC}"
+    fi
   fi
 
   prompt_read "  按回车键返回" _
@@ -1587,11 +2047,11 @@ do_repair() {
 
   local issues=0
 
-  if ! command -v node &>/dev/null; then
-    error "✗ Node.js 未安装"; issues=$((issues + 1))
+  local detected_node=""
+  if detected_node=$(get_node_path 2>/dev/null); then
+    success "✓ Node.js $(${detected_node} -v) 可用 (${detected_node})"
   else
-    local major; major=$(node -v | sed 's/v//' | cut -d. -f1)
-    [ "$major" -lt "$NODE_MAJOR" ] && { error "✗ Node.js 版本过低"; issues=$((issues + 1)); } || success "✓ Node.js $(node -v)"
+    error "✗ Node.js 未安装或版本不足（需要 ${NODE_MAJOR}+）"; issues=$((issues + 1))
   fi
 
   [ ! -d "${APP_DIR}" ] && { error "✗ 安装目录不存在"; issues=$((issues + 1)); } || success "✓ ${APP_DIR}"
@@ -1631,33 +2091,59 @@ do_uninstall() {
   echo -e "${BOLD}${YELLOW}  卸载（保留数据）${NC}"
   separator
 
+  if ! confirm_or_skip "  确认卸载？[y/N]: "; then
+    echo -e "  ${YELLOW}已取消${NC}"
+    return 0
+  fi
+
   echo -e "  ${CYAN}保留:${NC}  ${APP_DIR}/data, ${ENV_FILE}"
-  echo -e "  ${YELLOW}删除:${NC}  服务, 代码, 用户, Swap"
+  echo -e "  ${YELLOW}删除:${NC}  服务, 代码, 用户, Swap, Nginx 配置, SSL 证书"
   echo ""
 
-  systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
-  systemctl disable "${SERVICE_NAME}" 2>/dev/null || true
-
-  local temp_data="/tmp/metapi_data_$$" temp_env="/tmp/metapi_env_$$"
-  [ -d "${APP_DIR}/data" ] && mv "${APP_DIR}/data" "${temp_data}"
-  [ -f "${ENV_FILE}" ] && cp -a "${ENV_FILE}" "${temp_env}"
-
-  rm -rf "${APP_DIR:?}"/* "${APP_DIR}"/.[!.]* 2>/dev/null || true
-  [ -d "${temp_data}" ] && mv "${temp_data}" "${APP_DIR}/data"
-  [ -f "${temp_env}" ] && mv "${temp_env}" "${ENV_FILE}"
-
-  rm -f "${SERVICE_FILE}"; systemctl daemon-reload 2>/dev/null || true
-  id "${APP_USER}" &>/dev/null && userdel "${APP_USER}" 2>/dev/null || true
-
-  [ -f "${SWAP_FILE}" ] && { swapoff "${SWAP_FILE}" 2>/dev/null || true; rm -f "${SWAP_FILE}"; sed -i "\|${SWAP_FILE}|d" /etc/fstab; }
-  rm -f "${SYSCTL_CONF}" "${MARKER_FILE}"
+  local uninstall_domain=""
+  if [ -f "${MARKER_FILE}" ]; then
+    uninstall_domain=$(grep '^domain=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2)
+  fi
 
   remove_nginx_metapi_conf
+  remove_ssl_cert "$uninstall_domain"
+  safe_remove_service
+
+  if systemctl is-enabled --quiet certbot.timer 2>/dev/null; then
+    info "禁用 certbot 自动续期定时器..."
+    systemctl disable --now certbot.timer 2>/dev/null || true
+  fi
+
+  local tmpdir; tmpdir=$(mktemp -d)
+  [ -d "${APP_DIR}/data" ] && mv "${APP_DIR}/data" "${tmpdir}/data_backup"
+  [ -f "${ENV_FILE}" ] && cp -a "${ENV_FILE}" "${tmpdir}/env_backup"
+
+  if app_dir_managed || [ -f "${MARKER_FILE}" ]; then
+    rm -rf "${APP_DIR:?}"/* "${APP_DIR}"/.[!.]* 2>/dev/null || true
+    mkdir -p "${APP_DIR}"
+    [ -d "${tmpdir}/data_backup" ] && mv "${tmpdir}/data_backup" "${APP_DIR}/data"
+    [ -f "${tmpdir}/env_backup" ] && mv "${tmpdir}/env_backup" "${ENV_FILE}"
+  else
+    warn "${APP_DIR} 缺少 Metapi 管理标记，跳过目录清理"
+  fi
+  rm -rf "${tmpdir}"
+
+  safe_remove_app_user
+  safe_remove_swap
+  rm -f "${MARKER_FILE}"
 
   echo ""
   success "卸载完成（数据已保留）"
   echo -e "  数据: ${CYAN}${APP_DIR}/data${NC}"
   echo -e "  配置: ${CYAN}${ENV_FILE}${NC}"
+  echo ""
+  echo -e "  ${YELLOW}建议关闭端口 ${ACTUAL_PORT} 的防火墙规则:${NC}"
+  if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "active"; then
+    echo -e "    ${CYAN}ufw deny ${ACTUAL_PORT}/tcp${NC}"
+  fi
+  if command -v firewall-cmd &>/dev/null && firewall-cmd --state 2>/dev/null | grep -q "running"; then
+    echo -e "    ${CYAN}firewall-cmd --permanent --remove-port=${ACTUAL_PORT}/tcp && firewall-cmd --reload${NC}"
+  fi
 }
 
 do_uninstall_all() {
@@ -1667,20 +2153,45 @@ do_uninstall_all() {
   echo -e "  ${RED}⚠ 所有数据将丢失！${NC}"
   echo ""
 
-  systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
-  systemctl disable "${SERVICE_NAME}" 2>/dev/null || true
-  rm -f "${SERVICE_FILE}"; systemctl daemon-reload 2>/dev/null || true
+  if ! confirm_or_skip "  确认完整卸载？[y/N]: "; then
+    echo -e "  ${YELLOW}已取消${NC}"
+    return 0
+  fi
 
-  rm -rf "${APP_DIR}"
-  id "${APP_USER}" &>/dev/null && userdel -r "${APP_USER}" 2>/dev/null || true
-
-  [ -f "${SWAP_FILE}" ] && { swapoff "${SWAP_FILE}" 2>/dev/null || true; rm -f "${SWAP_FILE}"; sed -i "\|${SWAP_FILE}|d" /etc/fstab; }
-  rm -f "${SYSCTL_CONF}"; rm -rf "${LOG_DIR}"
+  local uninstall_domain=""
+  if [ -f "${MARKER_FILE}" ]; then
+    uninstall_domain=$(grep '^domain=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2)
+  fi
 
   remove_nginx_metapi_conf
+  remove_ssl_cert "$uninstall_domain"
+  safe_remove_service
+
+  if systemctl is-enabled --quiet certbot.timer 2>/dev/null; then
+    info "禁用 certbot 自动续期定时器..."
+    systemctl disable --now certbot.timer 2>/dev/null || true
+  fi
+
+  if app_dir_managed || [ -f "${MARKER_FILE}" ]; then
+    rm -rf "${APP_DIR}"
+  elif [ -d "${APP_DIR}" ]; then
+    warn "${APP_DIR} 缺少 Metapi 管理标记，跳过删除"
+  fi
+  safe_remove_app_user
+
+  safe_remove_swap
+  rm -rf "${LOG_DIR}"
 
   echo ""
   success "完整卸载完成"
+  echo ""
+  echo -e "  ${YELLOW}建议关闭端口 ${ACTUAL_PORT} 的防火墙规则:${NC}"
+  if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "active"; then
+    echo -e "    ${CYAN}ufw deny ${ACTUAL_PORT}/tcp${NC}"
+  fi
+  if command -v firewall-cmd &>/dev/null && firewall-cmd --state 2>/dev/null | grep -q "running"; then
+    echo -e "    ${CYAN}firewall-cmd --permanent --remove-port=${ACTUAL_PORT}/tcp && firewall-cmd --reload${NC}"
+  fi
 }
 
 do_upgrade() {
@@ -1765,30 +2276,94 @@ do_upgrade() {
     return 1
   fi
 
-  local env_backup="/tmp/metapi_env_upgrade_$$"
-  local data_backup="/tmp/metapi_data_upgrade_$$"
-  [ -f "${ENV_FILE}" ] && cp -a "${ENV_FILE}" "${env_backup}"
-  [ -d "${DATA_DIR}" ] && cp -a "${DATA_DIR}" "${data_backup}"
+  local backup_dir; backup_dir=$(mktemp -d)
+  info "备份当前版本到 ${backup_dir}..."
+  [ -f "${ENV_FILE}" ] && cp -a "${ENV_FILE}" "${backup_dir}/.env.backup"
+  [ -d "${DATA_DIR}" ] && cp -a "${DATA_DIR}" "${backup_dir}/data_backup"
+  [ -f "${MARKER_FILE}" ] && cp -a "${MARKER_FILE}" "${backup_dir}/.marker_backup"
+  cp -a "${APP_DIR}/dist" "${backup_dir}/dist_backup" 2>/dev/null || true
 
   systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
   rm -rf "${APP_DIR:?}"/* "${APP_DIR}"/.[!.]* 2>/dev/null || true
   cp -a "${extracted_dir}/." "${APP_DIR}/"
 
-  [ -f "${env_backup}" ] && cp -a "${env_backup}" "${ENV_FILE}"
-  [ -d "${data_backup}" ] && cp -a "${data_backup}/." "${DATA_DIR}/"
-  rm -rf "${tmp_dir}" "${env_backup}" "${data_backup}"
+  [ -f "${backup_dir}/.env.backup" ] && cp -a "${backup_dir}/.env.backup" "${ENV_FILE}"
+  [ -d "${backup_dir}/data_backup" ] && cp -a "${backup_dir}/data_backup/." "${DATA_DIR}/"
+  rm -rf "${tmp_dir}"
 
   write_marker
-  chown -R "${APP_USER}:${APP_USER}" "${APP_DIR}" 2>/dev/null || true
+  local app_group; app_group=$(app_group_name)
+  chown -R "${APP_USER}:${app_group}" "${APP_DIR}" 2>/dev/null || true
   install_systemd_service
   systemctl start "${SERVICE_NAME}"
 
-  if systemctl is-active --quiet "${SERVICE_NAME}"; then
+  info "等待服务启动..."
+  local retry=0
+  local service_ok=false
+  while [ $retry -lt 30 ]; do
+    if systemctl is-active "${SERVICE_NAME}" &>/dev/null; then
+      if curl -sf --connect-timeout 2 "http://127.0.0.1:${ACTUAL_PORT}" >/dev/null 2>&1; then
+        service_ok=true
+        break
+      fi
+    else
+      break
+    fi
+    retry=$((retry + 1)); sleep 1
+  done
+
+  if [ "$service_ok" = "true" ]; then
+    rm -rf "${backup_dir}"
     success "升级完成，${SERVICE_NAME} ${latest_version} 已启动"
+
+    if [ -f "${MARKER_FILE}" ]; then
+      local mk_domain; mk_domain=$(grep '^domain=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2 || echo "")
+      local mk_listen_port; mk_listen_port=$(grep '^listen_port=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2 || echo "")
+      local mk_cert_email; mk_cert_email=$(grep '^cert_email=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2 || echo "")
+      if [ -n "$mk_domain" ] && [ -n "$mk_cert_email" ] && detect_nginx; then
+        info "重新应用 Nginx + SSL 配置..."
+        DOMAIN_NAME="$mk_domain"
+        DOMAIN_LISTEN_PORT="$mk_listen_port"
+        CERTBOT_EMAIL="$mk_cert_email"
+        setup_nginx_ssl "${DOMAIN_NAME}" "${DOMAIN_LISTEN_PORT}" "${ACTUAL_PORT}" "${CERTBOT_EMAIL}" || true
+      elif [ -n "$mk_domain" ] && detect_nginx; then
+        info "重新应用 Nginx 反向代理配置..."
+        DOMAIN_NAME="$mk_domain"
+        DOMAIN_LISTEN_PORT="$mk_listen_port"
+        configure_nginx_proxy "${DOMAIN_NAME}" "${DOMAIN_LISTEN_PORT}" "${ACTUAL_PORT}" || true
+      fi
+    fi
+
     return 0
   else
-    error "升级完成，但服务启动失败"
+    error "升级后服务启动失败，正在回滚..."
     journalctl -u "${SERVICE_NAME}" -n 15 --no-pager 2>/dev/null
+
+    systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
+    rm -rf "${APP_DIR:?}"/* "${APP_DIR}"/.[!.]* 2>/dev/null || true
+
+    if [ -d "${backup_dir}/dist_backup" ]; then
+      cp -a "${backup_dir}/dist_backup/." "${APP_DIR}/dist/" 2>/dev/null || true
+    fi
+    [ -f "${backup_dir}/.env.backup" ] && cp -a "${backup_dir}/.env.backup" "${ENV_FILE}"
+    [ -d "${backup_dir}/data_backup" ] && cp -a "${backup_dir}/data_backup/." "${DATA_DIR}/"
+
+    chown -R "${APP_USER}:${app_group}" "${APP_DIR}" 2>/dev/null || true
+    install_systemd_service
+    systemctl start "${SERVICE_NAME}"
+
+    sleep 3
+    if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null && \
+       curl -sf --connect-timeout 2 "http://127.0.0.1:${ACTUAL_PORT}" >/dev/null 2>&1; then
+      warn "回滚成功，服务已恢复到升级前的版本"
+    else
+      error "回滚失败！需要手动干预"
+      error "备份位于: ${backup_dir}"
+      rm -rf "${backup_dir}"
+      return 1
+    fi
+
+    rm -rf "${backup_dir}"
     return 1
   fi
 }
