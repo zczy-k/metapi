@@ -1823,15 +1823,20 @@ _installation_wizard() {
   fi
   echo ""
 
-  echo -e "  ${YELLOW}域名配置（可选，留空则跳过）${NC}"
-  prompt_read "  第四步：输入域名（如 api.example.com）: " input_domain
-  if [ -n "$input_domain" ]; then
+  echo ""
+  echo -e "  ${YELLOW}第四步：是否配置域名和 SSL 证书？${NC}"
+  echo -e "  ${DIM}配置后将自动安装 Nginx 并设置反向代理和 HTTPS。${NC}"
+  echo -e "  ${DIM}如果选否，将直接使用 IP:端口 访问。${NC}"
+  prompt_read "  是否配置域名？[y/N]: " configure_domain
+  if [ "$configure_domain" = "y" ] || [ "$configure_domain" = "Y" ]; then
+    echo ""
+    prompt_read "  请输入域名（如 api.example.com）: " input_domain
     if ! validate_domain_format "$input_domain"; then
-      echo -e "  ${YELLOW}跳过域名配置${NC}"
+      echo -e "  ${YELLOW}域名格式无效，跳过域名配置${NC}"
       wizard_domain=""
       wizard_listen_port=""
       wizard_cert_email=""
-      echo -e "  ${DIM}跳过域名配置，仅 IP 访问${NC}"
+      echo -e "  ${DIM}仅 IP 访问${NC}"
     else
       wizard_domain="$input_domain"
 
@@ -1840,7 +1845,6 @@ _installation_wizard() {
         prompt_read "  是否继续？[y/N]: " dns_continue
         if [ "$dns_continue" != "y" ] && [ "$dns_continue" != "Y" ]; then
           wizard_domain=""
-          echo -e "  ${DIM}跳过域名配置，仅 IP 访问${NC}"
         fi
       fi
 
@@ -1876,6 +1880,8 @@ _installation_wizard() {
         else
           echo -e "    证书:  ${YELLOW}未设置（部署后可在主菜单 10 配置）${NC}"
         fi
+      else
+        echo -e "  ${DIM}已取消域名配置，仅 IP 访问${NC}"
       fi
     fi
   else
@@ -1894,6 +1900,11 @@ _installation_wizard() {
   echo -e "  代理令牌:     ${CYAN}已设置${NC}"
   if [ -n "$wizard_domain" ]; then
     echo -e "  域名:         ${CYAN}${wizard_domain}:${wizard_listen_port}${NC}"
+    if [ -n "$wizard_cert_email" ]; then
+      echo -e "  SSL 证书:     ${GREEN}将申请 Let's Encrypt 证书${NC}"
+    else
+      echo -e "  SSL 证书:     ${YELLOW}未配置（HTTP 模式）${NC}"
+    fi
   else
     echo -e "  域名:         ${DIM}未设置（仅 IP 访问）${NC}"
   fi
