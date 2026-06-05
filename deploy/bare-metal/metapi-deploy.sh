@@ -1242,6 +1242,7 @@ configure_env() {
   cat > "${ENV_FILE}" << EOF
 AUTH_TOKEN=${auth_token}
 PROXY_TOKEN=${proxy_token}
+HOST=0.0.0.0
 PORT=${ACTUAL_PORT}
 DATA_DIR=${APP_DIR}/data
 CHECKIN_CRON=0 8 * * *
@@ -1262,13 +1263,14 @@ merge_default_env_keys() {
     [ -z "$key" ] && continue
     [[ "$key" =~ ^[A-Z_][A-Z0-9_]*$ ]] || continue
     case "$key" in
-      AUTH_TOKEN|PROXY_TOKEN|PORT) continue ;;
+      AUTH_TOKEN|PROXY_TOKEN|PORT|HOST) continue ;;
     esac
     if ! grep -q "^${key}=" "${ENV_FILE}" 2>/dev/null; then
       info "补齐缺失配置: ${key}"
       printf '%s=%s\n' "$key" "$val" >> "${ENV_FILE}"
     fi
   done <<EOF
+HOST=0.0.0.0
 DATA_DIR=${APP_DIR}/data
 CHECKIN_CRON=0 8 * * *
 BALANCE_REFRESH_CRON=0 * * * *
@@ -1719,21 +1721,43 @@ show_status_info() {
   fi
 
   local configured_port; configured_port=$(grep '^PORT=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2 || echo "${DEFAULT_PORT}")
-  echo -e "  监听端口:  ${BOLD}${configured_port}${NC}"
+  local configured_host; configured_host=$(grep '^HOST=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2 || echo "0.0.0.0")
+  local has_nginx=false
+  detect_nginx && [ -f "${NGINX_METAPI_ENABLED}" ] && has_nginx=true
+
+  echo ""
+  echo -e "  ${BOLD}${CYAN}── 端口配置 ──${NC}"
+  echo -e "  内部端口:  ${BOLD}${configured_port}${NC}  ${DIM}(Metapi 服务监听端口)${NC}"
+  echo -e "  绑定地址:  ${BOLD}${configured_host}${NC}  ${DIM}($([ "$configured_host" = "127.0.0.1" ] && echo "仅本地访问，需通过 Nginx 代理" || echo "所有网络接口均可访问"))${NC}"
+
+  if [ "$has_nginx" = "true" ]; then
+    echo -e "  Nginx 代理: ${GREEN}✓ 已启用${NC}"
+  else
+    echo -e "  Nginx 代理: ${YELLOW}✗ 未启用${NC}"
+  fi
 
   local mk_domain; mk_domain=$(grep '^domain=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2 || echo "")
   [ -n "$mk_domain" ] && mk_domain=$(sanitize_domain "$mk_domain")
+  local mk_listen_port; mk_listen_port=$(grep '^listen_port=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2 || echo "")
+
   if [ -n "$mk_domain" ]; then
-    local mk_listen_port; mk_listen_port=$(grep '^listen_port=' "${MARKER_FILE}" 2>/dev/null | cut -d= -f2 || echo "")
+    echo ""
+    echo -e "  ${BOLD}${CYAN}── 域名配置 ──${NC}"
     echo -e "  域名:      ${CYAN}${mk_domain}${NC}"
-    [ -n "$mk_listen_port" ] && echo -e "  外部端口:  ${BOLD}${mk_listen_port}${NC}"
+    if [ -n "$mk_listen_port" ]; then
+      echo -e "  外部端口:  ${BOLD}${mk_listen_port}${NC}  ${DIM}(Nginx 监听的外网端口)${NC}"
+    fi
     if [ -d "${NGINX_SSL_DIR}/${mk_domain}" ]; then
       echo -e "  SSL 证书:  ${GREEN}✓ 已签发${NC}"
+    else
+      echo -e "  SSL 证书:  ${YELLOW}✗ 未签发${NC}"
     fi
   fi
 
   local pid; pid=$(systemctl show "${SERVICE_NAME}" --property=MainPID --value 2>/dev/null || echo "")
   if [ -n "$pid" ] && [ "$pid" != "0" ]; then
+    echo ""
+    echo -e "  ${BOLD}${CYAN}── 运行信息 ──${NC}"
     echo -e "  进程 PID:  ${BOLD}${pid}${NC}"
     local mem_info; mem_info=$(ps -p "$pid" -o rss= 2>/dev/null | awk '{printf "%.0fMB", $1/1024}')
     echo -e "  内存占用:  ${BOLD}${mem_info}${NC}"
@@ -1741,19 +1765,28 @@ show_status_info() {
     [ -n "$uptime_info" ] && echo -e "  运行时长:  ${BOLD}${uptime_info}${NC}"
   fi
 
+  echo ""
+  echo -e "  ${BOLD}${CYAN}── 访问地址 ──${NC}"
   local ip_addr; ip_addr=$(hostname -I 2>/dev/null | awk '{print $1}' || echo '服务器IP')
+
   if [ -n "$mk_domain" ] && [ -d "${NGINX_SSL_DIR}/${mk_domain}" ]; then
     if [ -n "$mk_listen_port" ] && [ "$mk_listen_port" != "443" ]; then
-      echo -e "  域名访问:  ${CYAN}https://${mk_domain}:${mk_listen_port}${NC}"
+      echo -e "  ${GREEN}➤${NC} ${CYAN}https://${mk_domain}:${mk_listen_port}${NC}"
     else
-      echo -e "  域名访问:  ${CYAN}https://${mk_domain}${NC}"
+      echo -e "  ${GREEN}➤${NC} ${CYAN}https://${mk_domain}${NC}"
     fi
   elif [ -n "$mk_domain" ] && [ -n "$mk_listen_port" ]; then
-    echo -e "  域名访问:  ${CYAN}http://${mk_domain}:${mk_listen_port}${NC}"
+    echo -e "  ${GREEN}➤${NC} ${CYAN}http://${mk_domain}:${mk_listen_port}${NC}"
   fi
-  echo -e "  IP 直连:    ${CYAN}http://${ip_addr}:${configured_port}${NC}"
+
+  if [ "$configured_host" = "0.0.0.0" ]; then
+    echo -e "  ${GREEN}➤${NC} ${CYAN}http://${ip_addr}:${configured_port}${NC}"
+  else
+    echo -e "  ${DIM}  IP 直连不可用（HOST=127.0.0.1，仅通过 Nginx 代理访问）${NC}"
+  fi
 
   local app_size; app_size=$(du -sh "${APP_DIR}" 2>/dev/null | awk '{print $1}' || echo "未知")
+  echo ""
   echo -e "  磁盘占用:  ${BOLD}${app_size}${NC}"
 
   echo ""
@@ -1987,6 +2020,16 @@ do_install() {
     run_step "配置 Nginx 反向代理" _setup_nginx_proxy || true
   fi
 
+  # Nginx 代理时仅监听本地，无 Nginx 时监听所有接口
+  if detect_nginx && [ -f "${NGINX_METAPI_ENABLED}" ]; then
+    sed -i "s|^HOST=.*|HOST=127.0.0.1|" "${ENV_FILE}" 2>/dev/null
+    grep -q "^HOST=" "${ENV_FILE}" 2>/dev/null || echo "HOST=127.0.0.1" >> "${ENV_FILE}"
+    systemctl restart "${SERVICE_NAME}" 2>/dev/null || true
+  else
+    sed -i "s|^HOST=.*|HOST=0.0.0.0|" "${ENV_FILE}" 2>/dev/null
+    grep -q "^HOST=" "${ENV_FILE}" 2>/dev/null || echo "HOST=0.0.0.0" >> "${ENV_FILE}"
+  fi
+
   write_marker
 
   echo ""
@@ -2083,6 +2126,8 @@ _configure_ssl_domain_interactive() {
     DOMAIN_LISTEN_PORT=""
     CERTBOT_EMAIL=""
     remove_nginx_metapi_conf
+    sed -i "s|^HOST=.*|HOST=0.0.0.0|" "${ENV_FILE}" 2>/dev/null
+    systemctl restart "${SERVICE_NAME}" 2>/dev/null || true
     echo -e "  ${YELLOW}域名配置已移除，Nginx 配置和 SSL 证书已清理${NC}"
     write_marker
     prompt_read "  按回车键返回" _
@@ -2177,6 +2222,11 @@ _configure_ssl_domain_interactive() {
     install_nginx
     configure_nginx_proxy "${DOMAIN_NAME}" "${DOMAIN_LISTEN_PORT}" "${ACTUAL_PORT}"
   fi
+
+  # Nginx 代理时仅监听本地
+  sed -i "s|^HOST=.*|HOST=127.0.0.1|" "${ENV_FILE}" 2>/dev/null
+  grep -q "^HOST=" "${ENV_FILE}" 2>/dev/null || echo "HOST=127.0.0.1" >> "${ENV_FILE}"
+  systemctl restart "${SERVICE_NAME}" 2>/dev/null || true
 
   write_marker
 
