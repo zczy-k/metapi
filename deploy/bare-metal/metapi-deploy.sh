@@ -525,6 +525,45 @@ check_port_conflict() {
   return 0
 }
 
+check_external_port_reusable() {
+  local port="$1"
+
+  if ! valid_port "$port"; then
+    error "External listen port must be a number between 1 and 65535: ${port}"
+    return 1
+  fi
+
+  if port_in_use "$port"; then
+    local listener_info=""
+    if command -v ss &>/dev/null; then
+      listener_info=$(ss -tlnp 2>/dev/null | awk -v p="$port" '
+        {
+          n = split($4, a, ":")
+          if (a[n] == p) { print; exit }
+        }
+      ' || true)
+    fi
+
+    if [ -n "$listener_info" ] && echo "$listener_info" | grep -qi "nginx"; then
+      info "External port ${port} is already handled by Nginx; reusing it with server_name routing"
+    else
+      error "External port ${port} is occupied by a non-Nginx process and cannot be reused"
+      [ -n "$listener_info" ] && error "  ${listener_info}"
+      return 1
+    fi
+  fi
+
+  if detect_nginx && nginx -T 2>/dev/null | grep -qP "^\s+listen\s+${port}\b"; then
+    if nginx -T 2>/dev/null | grep -B5 "listen.*${port}" | grep -q "stream"; then
+      error "External port ${port} is used by Nginx stream config; HTTP server_name reuse is not safe"
+      return 1
+    fi
+    info "Nginx already has HTTP listen ${port}; adding another server block for this domain"
+  fi
+
+  return 0
+}
+
 validate_domain_dns() {
   local domain="$1"
   local server_ip; server_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
@@ -718,6 +757,8 @@ configure_nginx_proxy() {
   local domain; domain=$(sanitize_domain "$1")
   local listen_port="$2" upstream_port="$3"
 
+  check_external_port_reusable "${listen_port}" || return 1
+
   info "写入 Nginx 反向代理配置..."
 
   if [ -f "${NGINX_METAPI_CONF}" ] && ! nginx_conf_managed; then
@@ -770,6 +811,8 @@ setup_nginx_ssl() {
   local domain; domain=$(sanitize_domain "$1")
   local ssl_port="$2" upstream_port="$3" email="$4"
   local use_port="${ssl_port:-443}"
+
+  check_external_port_reusable "${use_port}" || return 1
 
   info "配置 SSL 证书 (HTTPS 端口: ${use_port})..."
 
@@ -1886,7 +1929,7 @@ _installation_wizard() {
           local default_lp="443"
           prompt_read "  外部访问端口 [${default_lp}]: " input_lp
           wizard_listen_port="${input_lp:-$default_lp}"
-          if check_port_conflict "$wizard_listen_port"; then
+          if check_external_port_reusable "$wizard_listen_port"; then
             break
           fi
           prompt_read "  是否重新输入端口？[Y/n]: " retry_port
@@ -2079,11 +2122,13 @@ _install_service_and_perms() {
 }
 
 _setup_nginx_proxy() {
+  DOMAIN_LISTEN_PORT="${DOMAIN_LISTEN_PORT:-443}"
   install_nginx || return 1
   configure_nginx_proxy "${DOMAIN_NAME}" "${DOMAIN_LISTEN_PORT}" "${ACTUAL_PORT}"
 }
 
 _setup_nginx_ssl() {
+  DOMAIN_LISTEN_PORT="${DOMAIN_LISTEN_PORT:-443}"
   install_nginx || return 1
   setup_nginx_ssl "${DOMAIN_NAME}" "${DOMAIN_LISTEN_PORT}" "${ACTUAL_PORT}" "${CERTBOT_EMAIL}"
 }
@@ -2167,7 +2212,7 @@ _configure_ssl_domain_interactive() {
   while true; do
     prompt_read "  外部访问端口 (默认 ${default_port}): " new_port
     DOMAIN_LISTEN_PORT="${new_port:-$default_port}"
-    if check_port_conflict "$DOMAIN_LISTEN_PORT"; then
+    if check_external_port_reusable "$DOMAIN_LISTEN_PORT"; then
       break
     fi
     prompt_read "  是否重新输入端口？[Y/n]: " retry_port
